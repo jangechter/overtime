@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use serde::Serialize;
 
 use crate::hours::{worked_minutes, HoursError};
@@ -45,8 +45,9 @@ pub struct Store {
     conn: Connection,
 }
 
-/// Aktuelle Version des Datenbankschemas (`PRAGMA user_version`). 0 heißt: neue Datenbank oder Stand bis S4b ohne Version.
-const SCHEMA_VERSION: i64 = 1;
+/// Aktuelle Version des Datenbankschemas (`PRAGMA user_version`). 0 heißt: neue Datenbank oder Stand bis S4b ohne Version,
+/// 1: mit Spalte `minutes` (S5a), 2: mit Tabelle `week_targets` (S5b).
+const SCHEMA_VERSION: i64 = 2;
 
 impl Store {
     pub fn open(path: &Path) -> Result<Store, StoreError> {
@@ -132,6 +133,32 @@ impl Store {
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
+    /// Alle geladenen Zeiträume `(von, bis)`, nach Beginn sortiert.
+    pub fn loaded_ranges(&self) -> Result<Vec<(String, String)>, StoreError> {
+        let mut statement = self.conn.prepare("SELECT from_date, to_date FROM loaded_ranges ORDER BY from_date")?;
+        let rows = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// Das eingefrorene Soll der Woche mit Montag `week_start` in Minuten, falls vorhanden.
+    pub fn week_target(&self, week_start: &str) -> Result<Option<u32>, StoreError> {
+        check_date(week_start)?;
+        Ok(self
+            .conn
+            .query_row("SELECT target_minutes FROM week_targets WHERE week_start = ?1", [week_start], |row| row.get(0))
+            .optional()?)
+    }
+
+    /// Friert das Soll der Woche mit Montag `week_start` ein. Ein vorhandenes Soll bleibt unverändert.
+    pub fn freeze_week_target(&self, week_start: &str, minutes: u32) -> Result<(), StoreError> {
+        check_date(week_start)?;
+        self.conn.execute(
+            "INSERT OR IGNORE INTO week_targets (week_start, target_minutes) VALUES (?1, ?2)",
+            (week_start, minutes),
+        )?;
+        Ok(())
+    }
+
     /// Summe der gespeicherten Arbeitsminuten von `from` bis `to` (beide einschließlich).
     pub fn week_total(&self, from: &str, to: &str) -> Result<u32, StoreError> {
         check_date(from)?;
@@ -171,43 +198,53 @@ fn migrate(conn: &mut Connection) -> Result<(), StoreError> {
         return Ok(());
     }
     let tx = conn.transaction()?;
-    tx.execute_batch(
-        "CREATE TABLE IF NOT EXISTS entries (
-            date TEXT PRIMARY KEY,
-            start TEXT NOT NULL,
-            end TEXT NOT NULL,
-            break_minutes INTEGER NOT NULL,
-            minutes INTEGER NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS holidays (
-            date TEXT PRIMARY KEY,
-            name TEXT NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS loaded_ranges (
-            from_date TEXT NOT NULL,
-            to_date TEXT NOT NULL,
-            PRIMARY KEY (from_date, to_date)
-        );",
-    )?;
-    let has_minutes: bool = tx.query_row(
-        "SELECT EXISTS (SELECT 1 FROM pragma_table_info('entries') WHERE name = 'minutes')",
-        [],
-        |row| row.get(0),
-    )?;
-    if !has_minutes {
-        tx.execute("ALTER TABLE entries ADD COLUMN minutes INTEGER NOT NULL DEFAULT 0", [])?;
-        let rows = {
-            let mut statement = tx.prepare("SELECT date, start, end, break_minutes FROM entries")?;
-            let rows = statement.query_map([], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, u32>(3)?))
-            })?;
-            rows.collect::<Result<Vec<_>, _>>()?
-        };
-        for (date, start, end, break_minutes) in rows {
-            let minutes = worked_minutes(&start, &end, f64::from(break_minutes))
-                .map_err(|_| StoreError::InvalidLegacyEntry(date.clone()))?;
-            tx.execute("UPDATE entries SET minutes = ?1 WHERE date = ?2", (minutes, &date))?;
+    if version < 1 {
+        tx.execute_batch(
+            "CREATE TABLE IF NOT EXISTS entries (
+                date TEXT PRIMARY KEY,
+                start TEXT NOT NULL,
+                end TEXT NOT NULL,
+                break_minutes INTEGER NOT NULL,
+                minutes INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS holidays (
+                date TEXT PRIMARY KEY,
+                name TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS loaded_ranges (
+                from_date TEXT NOT NULL,
+                to_date TEXT NOT NULL,
+                PRIMARY KEY (from_date, to_date)
+            );",
+        )?;
+        let has_minutes: bool = tx.query_row(
+            "SELECT EXISTS (SELECT 1 FROM pragma_table_info('entries') WHERE name = 'minutes')",
+            [],
+            |row| row.get(0),
+        )?;
+        if !has_minutes {
+            tx.execute("ALTER TABLE entries ADD COLUMN minutes INTEGER NOT NULL DEFAULT 0", [])?;
+            let rows = {
+                let mut statement = tx.prepare("SELECT date, start, end, break_minutes FROM entries")?;
+                let rows = statement.query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, u32>(3)?))
+                })?;
+                rows.collect::<Result<Vec<_>, _>>()?
+            };
+            for (date, start, end, break_minutes) in rows {
+                let minutes = worked_minutes(&start, &end, f64::from(break_minutes))
+                    .map_err(|_| StoreError::InvalidLegacyEntry(date.clone()))?;
+                tx.execute("UPDATE entries SET minutes = ?1 WHERE date = ?2", (minutes, &date))?;
+            }
         }
+    }
+    if version < 2 {
+        tx.execute_batch(
+            "CREATE TABLE IF NOT EXISTS week_targets (
+                week_start TEXT PRIMARY KEY,
+                target_minutes INTEGER NOT NULL
+            );",
+        )?;
     }
     tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     tx.commit()?;
@@ -644,7 +681,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("overtime.db");
         Store::open(&path).unwrap();
-        assert_eq!(schema_version(&path), 1);
+        assert_eq!(schema_version(&path), 2);
         assert!(has_minutes_column(&path));
     }
 
@@ -661,7 +698,7 @@ mod tests {
         assert_eq!(store.week_total("2026-11-16", "2026-11-22").unwrap(), 660);
         assert_eq!(store.holidays_between("2026-12-25", "2026-12-25").unwrap(), vec![holiday("2026-12-25", "1. Weihnachtsfeiertag")]);
         assert!(store.is_loaded("2026-12-01", "2027-02-01").unwrap());
-        assert_eq!(schema_version(&path), 1);
+        assert_eq!(schema_version(&path), 2);
     }
 
     #[test]
@@ -701,5 +738,66 @@ mod tests {
         assert_eq!(error.to_string(), "Die Datenbank stammt aus einer neueren Version der App und kann nicht geöffnet werden.");
         assert_eq!(schema_version(&path), 99);
         assert!(!has_minutes_column(&path));
+    }
+
+    #[test]
+    fn loaded_ranges_are_listed_by_start() {
+        let (_dir, mut store) = open_temp();
+        assert!(store.loaded_ranges().unwrap().is_empty());
+        store.save_holidays("2027-03-01", "2027-03-07", &[]).unwrap();
+        store.save_holidays("2026-11-02", "2026-11-29", &[]).unwrap();
+        assert_eq!(
+            store.loaded_ranges().unwrap(),
+            vec![("2026-11-02".to_string(), "2026-11-29".to_string()), ("2027-03-01".to_string(), "2027-03-07".to_string())]
+        );
+    }
+
+    #[test]
+    fn week_without_a_frozen_target_has_none() {
+        let (_dir, store) = open_temp();
+        assert_eq!(store.week_target("2026-11-16").unwrap(), None);
+    }
+
+    #[test]
+    fn frozen_target_is_read_back_and_survives_reopening() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("overtime.db");
+        Store::open(&path).unwrap().freeze_week_target("2026-11-16", 1920).unwrap();
+        assert_eq!(Store::open(&path).unwrap().week_target("2026-11-16").unwrap(), Some(1920));
+    }
+
+    #[test]
+    fn freezing_again_keeps_the_first_target() {
+        let (_dir, store) = open_temp();
+        store.freeze_week_target("2026-11-16", 1920).unwrap();
+        store.freeze_week_target("2026-11-16", 2400).unwrap();
+        assert_eq!(store.week_target("2026-11-16").unwrap(), Some(1920));
+    }
+
+    #[test]
+    fn freezing_rejects_a_malformed_date() {
+        let (_dir, store) = open_temp();
+        assert!(matches!(store.freeze_week_target("morgen", 2400), Err(StoreError::InvalidDate)));
+        assert!(matches!(store.week_target("morgen"), Err(StoreError::InvalidDate)));
+    }
+
+    #[test]
+    fn database_in_the_s5a_schema_gets_the_targets_table_and_keeps_its_data() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("overtime.db");
+        raw(&path)
+            .execute_batch(
+                "CREATE TABLE entries (date TEXT PRIMARY KEY, start TEXT NOT NULL, end TEXT NOT NULL, break_minutes INTEGER NOT NULL, minutes INTEGER NOT NULL);
+                CREATE TABLE holidays (date TEXT PRIMARY KEY, name TEXT NOT NULL);
+                CREATE TABLE loaded_ranges (from_date TEXT NOT NULL, to_date TEXT NOT NULL, PRIMARY KEY (from_date, to_date));
+                INSERT INTO entries VALUES ('2026-11-16', '08:00', '16:30', 30, 999);
+                PRAGMA user_version = 1;",
+            )
+            .unwrap();
+        let store = Store::open(&path).unwrap();
+        assert_eq!(store.between("2026-11-16", "2026-11-16").unwrap()[0].minutes, 999, "Minuten werden nicht neu berechnet");
+        store.freeze_week_target("2026-11-16", 1920).unwrap();
+        assert_eq!(store.week_target("2026-11-16").unwrap(), Some(1920));
+        assert_eq!(schema_version(&path), 2);
     }
 }

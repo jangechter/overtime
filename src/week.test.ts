@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { currentWeek, formatHours, shiftWeek } from "./week";
+import { currentWeek, formatBalance, formatHours, shiftWeek } from "./week";
 
 describe("currentWeek", () => {
   it("liefert Montag bis Sonntag mitten in der Woche", () => {
@@ -58,5 +58,17 @@ describe("formatHours", () => {
 
   it("zeigt 0 Minuten als 0:00 h", () => {
     expect(formatHours(0)).toBe("0:00 h");
+  });
+});
+
+describe("formatBalance", () => {
+  it("setzt Plus vor Überstunden und Minus vor Minusstunden", () => {
+    expect(formatBalance(300)).toBe("+5:00 h");
+    expect(formatBalance(-300)).toBe("−5:00 h");
+    expect(formatBalance(-45)).toBe("−0:45 h");
+  });
+
+  it("zeigt einen ausgeglichenen Saldo ohne Vorzeichen", () => {
+    expect(formatBalance(0)).toBe("0:00 h");
   });
 });

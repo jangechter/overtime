@@ -2,13 +2,21 @@
 import { computed, onMounted, ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import WeekRow, { type StoredEntry } from "./components/WeekRow.vue";
-import { currentWeek, formatHours, shiftWeek } from "./week";
+import { currentWeek, formatBalance, formatHours, shiftWeek } from "./week";
 
 const days = ref(currentWeek());
 const entries = ref<Record<string, StoredEntry>>({});
 const holidays = ref<Record<string, string>>({});
-/** Ist-Summe der angezeigten Woche in Minuten, berechnet im Backend. */
-const weekTotal = ref(0);
+interface WeekSummary {
+  actualMinutes: number;
+  targetMinutes: number;
+  balanceMinutes: number;
+  /** Für die Woche fehlen Feiertage, das Soll ist deshalb nicht um Feiertage gesenkt. */
+  targetIncomplete: boolean;
+}
+
+/** Ist, Soll und Saldo der angezeigten Woche in Minuten, berechnet im Backend. */
+const summary = ref<WeekSummary>({ actualMinutes: 0, targetMinutes: 0, balanceMinutes: 0, targetIncomplete: false });
 const loaded = ref(false);
 const loadError = ref("");
 const saveError = ref("");
@@ -19,7 +27,7 @@ const weekFetchError = ref("");
 /** Wochen (Montag), deren Feiertage gerade per Knopf nachgeladen werden. */
 const fetching = ref(new Set<string>());
 let latestRequest = 0;
-let latestTotalRequest = 0;
+let latestSummaryRequest = 0;
 
 const formatDate = (date: string) => new Date(`${date}T00:00:00`).toLocaleDateString("de-DE");
 const weekLabel = computed(() => `${formatDate(days.value[0])} – ${formatDate(days.value[6])}`);
@@ -47,23 +55,25 @@ async function reloadHolidays() {
     if (days.value[0] === weekStart) showHolidays(week);
   } catch (e) {
     loadError.value = String(e);
+    return;
   }
+  await reloadSummary();
 }
 
-/** Liest die Wochensumme neu (nach Speichern oder Löschen einer Zeile), ohne die Zeilen anzufassen. */
-async function reloadTotal() {
-  const request = ++latestTotalRequest;
+/** Liest Ist, Soll und Saldo neu (nach Speichern, Löschen oder neuen Feiertagen), ohne die Zeilen anzufassen. */
+async function reloadSummary() {
+  const request = ++latestSummaryRequest;
   const weekStart = days.value[0];
   try {
-    const minutes = await fetchTotal();
-    if (request === latestTotalRequest && days.value[0] === weekStart) weekTotal.value = minutes;
+    const week = await fetchSummary();
+    if (request === latestSummaryRequest && days.value[0] === weekStart) summary.value = week;
   } catch (e) {
     loadError.value = String(e);
   }
 }
 
-function fetchTotal(): Promise<number> {
-  return invoke<number>("week_total", { from: days.value[0], to: days.value[6] });
+function fetchSummary(): Promise<WeekSummary> {
+  return invoke<WeekSummary>("week_summary", { date: days.value[0] });
 }
 
 async function loadWeek() {
@@ -74,19 +84,19 @@ async function loadWeek() {
   weekFetchError.value = "";
   holidaysMissing.value = false;
   try {
-    const [rows, week, minutes] = await Promise.all([
+    const [rows, week, weekSummary] = await Promise.all([
       invoke<Array<StoredEntry & { date: string }>>("load_entries", {
         from: days.value[0],
         to: days.value[6],
       }),
       fetchHolidays(),
-      fetchTotal(),
+      fetchSummary(),
     ]);
     if (request !== latestRequest) return;
     entries.value = Object.fromEntries(rows.map((row) => [row.date, row]));
     showHolidays(week);
-    latestTotalRequest++;
-    weekTotal.value = minutes;
+    latestSummaryRequest++;
+    summary.value = weekSummary;
   } catch (e) {
     if (request !== latestRequest) return;
     loadError.value = String(e);
@@ -172,9 +182,18 @@ onMounted(() => {
         :entry="entries[day]"
         :holiday="holidays[day]"
         :on-save-failed="reportSaveFailure"
-        @saved="reloadTotal"
+        @saved="reloadSummary"
       />
-      <p class="total" data-test="week-total">Wochensumme: {{ formatHours(weekTotal) }}</p>
+      <section class="summary">
+        <p data-test="week-total">Wochensumme: {{ formatHours(summary.actualMinutes) }}</p>
+        <p data-test="week-target">Soll: {{ formatHours(summary.targetMinutes) }}</p>
+        <p data-test="week-balance" :class="{ negative: summary.balanceMinutes < 0 }">
+          Saldo: {{ formatBalance(summary.balanceMinutes) }}
+        </p>
+        <p v-if="summary.targetIncomplete" class="warning" data-test="target-incomplete">
+          Das Soll ist ohne Feiertagsabzug berechnet, weil für diese Woche Feiertage fehlen.
+        </p>
+      </section>
     </template>
     <footer class="source" data-test="holiday-source">Feiertage: OpenHolidays API (ODbL)</footer>
   </main>
@@ -185,6 +204,8 @@ main { max-width: 56rem; margin: 0 auto; padding: 1rem; font-family: system-ui, 
 .week-nav { display: flex; align-items: center; justify-content: space-between; margin-bottom: 1rem; }
 .error { color: #b00020; }
 .warning { color: #8a5a00; }
-.total { margin-top: 1rem; font-weight: 600; }
+.summary { margin-top: 1rem; font-weight: 600; }
+.summary p { margin: 0.25rem 0; }
+.negative { color: #b00020; }
 .source { margin-top: 1rem; font-size: 0.8rem; color: #666; }
 </style>

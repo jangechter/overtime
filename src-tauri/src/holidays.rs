@@ -6,7 +6,8 @@ use std::time::Duration;
 use chrono::{Datelike, Days, Months, NaiveDate};
 use serde::Deserialize;
 
-use crate::store::{check_date, Holiday, Store, StoreError};
+use crate::store::{Holiday, Store, StoreError};
+use crate::week::{format_date, week_of};
 
 #[derive(Debug)]
 pub enum HolidayError {
@@ -57,10 +58,6 @@ pub fn window(today: NaiveDate) -> (String, String) {
     (format_date(monday), format_date(sunday))
 }
 
-fn format_date(date: NaiveDate) -> String {
-    date.format("%Y-%m-%d").to_string()
-}
-
 fn request_url(from: &str, to: &str) -> String {
     format!(
         "https://openholidaysapi.org/PublicHolidays?countryIsoCode=DE&subdivisionCode=DE-NW&languageIsoCode=DE&validFrom={from}&validTo={to}"
@@ -108,14 +105,6 @@ fn parse(json: &str) -> Result<Vec<Holiday>, HolidayError> {
 pub fn refresh(store: &Mutex<Store>, api: &dyn HolidayApi, today: NaiveDate) -> Result<(), HolidayError> {
     let (from, to) = window(today);
     fetch_and_save(store, api, &from, &to)
-}
-
-/// Montag und Sonntag der Woche, in der `date` liegt, als `(von, bis)` im Format `YYYY-MM-DD`.
-pub fn week_of(date: &str) -> Result<(String, String), HolidayError> {
-    check_date(date)?;
-    let day = NaiveDate::parse_from_str(date, "%Y-%m-%d").map_err(|_| StoreError::InvalidDate)?;
-    let monday = day - Days::new(u64::from(day.weekday().num_days_from_monday()));
-    Ok((format_date(monday), format_date(monday + Days::new(6))))
 }
 
 /// Holt genau die Woche, in der `date` liegt, von `api` und ersetzt damit ihre gespeicherten Feiertage.
@@ -347,25 +336,6 @@ mod tests {
         );
         assert!(store.is_loaded("2026-12-06", "2027-02-20").unwrap());
         assert!(!store.is_loaded("2027-03-01", "2027-03-07").unwrap(), "Fenster des Fehlversuchs gilt nicht als geladen");
-    }
-
-    #[test]
-    fn week_of_returns_monday_to_sunday_for_any_day_of_the_week() {
-        for day in ["2026-11-16", "2026-11-18", "2026-11-22"] {
-            assert_eq!(week_of(day).unwrap(), ("2026-11-16".to_string(), "2026-11-22".to_string()), "{day}");
-        }
-    }
-
-    #[test]
-    fn week_of_spans_the_year_boundary() {
-        assert_eq!(week_of("2027-01-01").unwrap(), ("2026-12-28".to_string(), "2027-01-03".to_string()));
-    }
-
-    #[test]
-    fn week_of_rejects_a_malformed_date() {
-        for day in ["", "morgen", "2026-02-31", "16.11.2026", "2026-1-5"] {
-            assert!(matches!(week_of(day), Err(HolidayError::Store(StoreError::InvalidDate))), "{day}");
-        }
     }
 
     #[test]

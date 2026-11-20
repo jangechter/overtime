@@ -20,3 +20,9 @@ export function shiftWeek(week: string[], weeks: number): string[] {
 export function formatHours(minutes: number): string {
   return `${Math.floor(minutes / 60)}:${pad(minutes % 60)} h`;
 }
+
+/** Saldo mit Vorzeichen: „+5:00 h“, „−5:00 h“ (Minuszeichen), ausgeglichen „0:00 h“. */
+export function formatBalance(minutes: number): string {
+  if (minutes === 0) return formatHours(0);
+  return `${minutes > 0 ? "+" : "−"}${formatHours(Math.abs(minutes))}`;
+}
