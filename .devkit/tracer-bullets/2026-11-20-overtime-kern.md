@@ -21,14 +21,17 @@
 - Rust (`cargo`, `rustc`) und die Tauri-Voraussetzungen sind auf dem Rechner nicht installiert und müssen vor S1 eingerichtet werden. Node ist vorhanden.
 - Dieser Plan ist Plan A von zwei. Plan B (Krank/Urlaub, Einstellungen für Soll/Bundesland, Monatssumme und Durchschnitt, CSV-Export) bekommt eine eigene Datei, sobald Plan A steht.
 
+## Decided (nach Erstellung des Plans, 2026-11-20)
+- Feiertags-API: OpenHolidays (`https://openholidaysapi.org/PublicHolidays?countryIsoCode=DE&subdivisionCode=DE-NW&languageIsoCode=DE&validFrom=…&validTo=…`). Gründe: ein Aufruf deckt den Zeitraum ab (auch über den Jahreswechsel), kein Schlüssel, laut FAQ kostenlos und kommerziell erlaubt, Lizenz ODbL (Quelle nennen), dokumentierte Datenquellen. Verworfen: Nager.Date (Nutzung kommerziell nur mit Sponsoring, Nutzungsbedingungen jederzeit änderbar, Doku wechselt auf v4/neue Domain) und feiertage-api.de (nur pro Jahr abfragbar, keine Lizenz genannt, Privatdienst auf Wikipedia-Basis). Alle drei lieferten für NRW 2026 dieselben 11 Feiertage.
+- Lücken über 2 Wochen: Die App lädt beim Start nur das feste Fenster (−2 Wochen bis +2 Monate). Für eine angezeigte Woche ohne geladene Feiertage erscheint eine Warnung „Feiertage für diese Woche fehlen“ mit dem Knopf „Feiertage laden“, der genau diese Woche von der API holt und speichert. Ohne Netz bleibt die Warnung, es erscheint eine Meldung, die App rechnet weiter. Das Soll wird für solche Wochen nicht automatisch gesenkt, solange die Feiertage fehlen (betrifft S5).
+- Die App merkt sich, welche Zeiträume geladen wurden (eigene Tabelle in SQLite); sonst ist „keine Feiertage in dieser Woche“ nicht von „nie geladen“ zu unterscheiden.
+
 ## Open
 - Reihenfolge der Teile nach der Speicherung war nicht festgelegt; die Reihenfolge S3 bis S5 ist nur nach Risiko und Abhängigkeit sortiert (betrifft S3, S4, S5).
-- Feiertage bei Lücken von mehr als 2 Wochen – keine Regel (betrifft S4, S5).
-- Konkrete öffentliche Feiertags-API und deren Konditionen – nicht ausgewählt, ungeprüft (betrifft S4).
 - Grund für die Berechnung im Rust-Backend und Gründe gegen SwiftUI/Electron – nicht genannt (kein Slice betroffen).
 
 ## Not checked
-- Konditionen der Feiertags-APIs (keine Recherche durchgeführt).
+- Verfügbarkeit und Ausfallhistorie von OpenHolidays (nicht gemessen); ob die ODbL-Quellenangabe in der App an einer bestimmten Stelle stehen muss (nur FAQ gelesen, Lizenztext nicht).
 - Ob die Tauri-Voraussetzungen auf dem Mac vollständig sind (`cargo` und `rustc` fehlen laut Prüfung).
 
 ## S1: Wochenübersicht mit Eingabe und Tagesstunden
@@ -65,21 +68,15 @@
 - Notes: Tests grün (Rust 21/21, Vue 32/32), Demo vom Nutzer im Fenster bestätigt. Über den ursprünglichen Plan hinaus gibt es einen „Heute“-Knopf (auf Wunsch des Nutzers), der aus jeder Woche in die aktuelle springt; in der aktuellen Woche lädt er nicht neu.
 
 ## S4: Feiertage NRW laden, speichern und anzeigen
-- Goal: Feiertage für NRW werden über eine öffentliche API für die letzten 2 Wochen und die nächsten 2 Monate geholt, lokal gespeichert und in der Wochenübersicht markiert; ohne Netz erscheint nur eine Warnung.
-- Risk: 1 (Open: API nicht ausgewählt, Lücken über 2 Wochen ohne Regel), 2 (externe API, im leeren Projekt noch nie angebunden), 3 (HTTP-Aufruf aus Rust neu)
-- Demo: App mit Netz starten und in eine Woche mit einem NRW-Feiertag blättern; der Tag ist als Feiertag markiert. Netz trennen und App neu starten; gespeicherte Feiertage bleiben sichtbar, für fehlende Zeiträume erscheint eine Warnung, die App rechnet weiter.
-- Tests: Rust-Tests mit gemockter API-Antwort (Parsen, Speichern, Zeitfenster −2 Wochen bis +2 Monate); Test für den Ausfall der API (Warnung statt Fehler); Vue-Test für die Markierung.
-- Touches: none yet (Projekt ist leer)
+- Goal: Feiertage für NRW werden von OpenHolidays für die letzten 2 Wochen und die nächsten 2 Monate geholt, lokal gespeichert und in der Wochenübersicht markiert. Für eine Woche ohne geladene Feiertage erscheint eine Warnung mit dem Knopf „Feiertage laden“, der genau diese Woche nachlädt. Ohne Netz erscheint nur eine Warnung bzw. Meldung, die App rechnet weiter.
+- Risk: 2 (externe API, im Projekt noch nie angebunden), 3 (HTTP-Aufruf aus Rust neu), 4 (Tabelle der geladenen Zeiträume und die gespeicherten Feiertage; S5 baut darauf auf)
+- Demo: App mit Netz starten und in eine Woche mit einem NRW-Feiertag blättern; der Tag ist als Feiertag markiert. Netz trennen und App neu starten; gespeicherte Feiertage bleiben sichtbar. In eine Woche außerhalb des Fensters blättern: Warnung „Feiertage für diese Woche fehlen“ mit Knopf. Ohne Netz auf „Feiertage laden“: Meldung, Warnung bleibt, die App rechnet weiter. Mit Netz auf „Feiertage laden“: Feiertage erscheinen markiert, Warnung verschwindet.
+- Tests: Rust-Tests mit gemockter API-Antwort (Parsen inkl. `nationwide`/`regionalScope`, Speichern, Zeitfenster −2 Wochen bis +2 Monate, auch über den Jahreswechsel); Test für den Ausfall der API (Warnung statt Fehler); Rust-Test für die Tabelle der geladenen Zeiträume (geladen vs. nie geladen, Woche ohne Feiertage gilt als geladen); Vue-Tests für die Markierung, die Warnung und den Knopf „Feiertage laden“ (Erfolg, Ausfall).
+- Touches: src-tauri/src/store.rs (Schema, Feiertage und geladene Zeiträume), src-tauri/src/lib.rs (neue Commands), src/WeekView.vue, src/components/WeekRow.vue; neue Rust-Abhängigkeit für HTTP
 - Depends on: S2, S3
-- Open: Konkrete API und Konditionen; Lücken über 2 Wochen; Reihenfolge nach der Speicherung
+- Open: Reihenfolge nach der Speicherung
 - Status: todo
-- Notes: Vor Beginn die API auswählen und ihre Konditionen prüfen; die Wahl dem Nutzer vorlegen (zwei bis drei Kandidaten mit Vor- und Nachteilen). Recherche-Checkliste, pro Kandidat mit Quelle belegen:
-  - Bundesland NRW abrufbar (Feiertage nur für NRW, nicht nur bundesweit).
-  - Zeitraum von 2 Wochen zurück bis 2 Monate voraus abfragbar (auch über den Jahreswechsel).
-  - Kosten, Limits (Anfragen pro Zeit) und Lizenz; ob ein API-Schlüssel nötig ist.
-  - Ausfallsicherheit: Betreiber, Alter und Pflege des Dienstes, Verhalten bei Fehlern.
-  - Format der Antwort (Felder, Datumsformat), damit Parsen und gemockte Tests einfach bleiben.
-  Außerdem klären: Regel für Lücken über 2 Wochen (siehe Open).
+- Notes: API und Lückenregel sind entschieden (siehe „Decided“ oben). Die Quelle „OpenHolidays API (ODbL)“ in der App nennen. Beim Parsen beachten: Einträge haben `regionalScope: "Regional"` neben `nationwide: true`; Zeiträume über 3 Jahre lehnt die API mit HTTP 400 ab (für unser Fenster irrelevant). Der Knopf „Feiertage laden“ geht über den ursprünglichen Plan hinaus (Wunsch des Nutzers). Wird der Slice zu groß, aufteilen: S4a Fenster laden, speichern, markieren; S4b Warnung und Nachladen per Knopf (jeweils mit eigenem Test und Demo, `S4` dann auf `split`).
 
 ## S5: Wochensumme, Soll und Über-/Minusstunden
 - Goal: Pro Woche werden Ist-Summe, Soll (40 h, Feiertage senken es um 8 h pro Feiertag Montag bis Freitag) und der Saldo als Über- oder Minusstunden angezeigt, berechnet im Rust-Backend.
