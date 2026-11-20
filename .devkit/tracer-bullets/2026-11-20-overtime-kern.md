@@ -39,8 +39,8 @@
 - Touches: none yet (Projekt ist leer)
 - Depends on: none
 - Open: Reihenfolge nach der Speicherung
-- Status: in progress
-- Notes: Tests grün (Rust 7/7, Vue 4/4), App startet (`tauri dev`). Demo-Schritte (Eingabe im Fenster, Meldung bei ungültiger Eingabe) wurden nicht im Fenster ausgeführt – kein Klicken möglich. Deshalb nicht `done`. Ende == Start wird als ungültig behandelt (Annahme).
+- Status: done
+- Notes: Tests grün (Rust 9/9, Vue 13/13), Demo vom Nutzer im Fenster bestätigt. Ende == Start gilt als ungültig (Annahme). Uhrzeiten sind Textfelder im Format HH:MM (24 h), weil `type="time"` der Systemeinstellung folgt. CSP ist noch `null` (bewusst zurückgestellt).
 
 ## S2: Einträge in SQLite speichern
 - Goal: Eingetragene Tage bleiben nach dem Neustart der App erhalten.

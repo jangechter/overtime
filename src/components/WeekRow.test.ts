@@ -87,4 +87,23 @@ describe("WeekRow", () => {
     await flushPromises();
     expect(wrapper.get('[data-test="hours"]').text()).toBe("7:30 h");
   });
+
+  it("nimmt Uhrzeiten als 24-Stunden-Text HH:MM entgegen", () => {
+    const wrapper = mount(WeekRow, { props: { date: "2026-11-16" } });
+    for (const field of ["start", "end"]) {
+      const input = wrapper.get(`[data-test="${field}"]`);
+      expect(input.attributes("type")).toBe("text");
+      expect(input.attributes("placeholder")).toBe("HH:MM");
+      expect(input.attributes("maxlength")).toBe("5");
+    }
+  });
+
+  it("zeigt die Backend-Meldung bei einer ungültigen Uhrzeit wie 25:00", async () => {
+    backend = async () => {
+      throw "Bitte Uhrzeiten im Format HH:MM eingeben.";
+    };
+    const wrapper = mount(WeekRow, { props: { date: "2026-11-16" } });
+    await fill(wrapper, "08:00", "25:00", "0");
+    expect(wrapper.get('[data-test="error"]').text()).toBe("Bitte Uhrzeiten im Format HH:MM eingeben.");
+  });
 });

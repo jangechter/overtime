@@ -53,8 +53,8 @@ watch([start, end, breakMinutes], async () => {
       <strong>{{ weekday }}</strong>
       <span>{{ dateLabel }}</span>
     </div>
-    <label>Start <input v-model="start" type="time" data-test="start" /></label>
-    <label>Ende <input v-model="end" type="time" data-test="end" /></label>
+    <label>Start <input v-model="start" type="text" inputmode="numeric" placeholder="HH:MM" maxlength="5" data-test="start" /></label>
+    <label>Ende <input v-model="end" type="text" inputmode="numeric" placeholder="HH:MM" maxlength="5" data-test="end" /></label>
     <label>Pause (Min) <input v-model="breakMinutes" type="number" min="0" data-test="break" /></label>
     <span v-if="minutes !== null" class="hours" data-test="hours">{{ hoursLabel }}</span>
     <span v-if="error" class="error" data-test="error">{{ error }}</span>
@@ -67,4 +67,5 @@ watch([start, end, breakMinutes], async () => {
 .hours { font-weight: 600; }
 .error { color: #b00020; }
 input[type="number"] { width: 4rem; }
+input[type="text"] { width: 4.5rem; }
 </style>
