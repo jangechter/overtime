@@ -73,7 +73,13 @@
 - Depends on: S2, S3
 - Open: Konkrete API und Konditionen; Lücken über 2 Wochen; Reihenfolge nach der Speicherung
 - Status: todo
-- Notes: Vor Beginn die API auswählen und ihre Konditionen prüfen; die Wahl dem Nutzer vorlegen.
+- Notes: Vor Beginn die API auswählen und ihre Konditionen prüfen; die Wahl dem Nutzer vorlegen (zwei bis drei Kandidaten mit Vor- und Nachteilen). Recherche-Checkliste, pro Kandidat mit Quelle belegen:
+  - Bundesland NRW abrufbar (Feiertage nur für NRW, nicht nur bundesweit).
+  - Zeitraum von 2 Wochen zurück bis 2 Monate voraus abfragbar (auch über den Jahreswechsel).
+  - Kosten, Limits (Anfragen pro Zeit) und Lizenz; ob ein API-Schlüssel nötig ist.
+  - Ausfallsicherheit: Betreiber, Alter und Pflege des Dienstes, Verhalten bei Fehlern.
+  - Format der Antwort (Felder, Datumsformat), damit Parsen und gemockte Tests einfach bleiben.
+  Außerdem klären: Regel für Lücken über 2 Wochen (siehe Open).
 
 ## S5: Wochensumme, Soll und Über-/Minusstunden
 - Goal: Pro Woche werden Ist-Summe, Soll (40 h, Feiertage senken es um 8 h pro Feiertag Montag bis Freitag) und der Saldo als Über- oder Minusstunden angezeigt, berechnet im Rust-Backend.
