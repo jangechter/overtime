@@ -75,8 +75,33 @@
 - Touches: src-tauri/src/store.rs (Schema, Feiertage und geladene Zeiträume), src-tauri/src/lib.rs (neue Commands), src/WeekView.vue, src/components/WeekRow.vue; neue Rust-Abhängigkeit für HTTP
 - Depends on: S2, S3
 - Open: Reihenfolge nach der Speicherung
+- Status: split
+- Notes: API und Lückenregel sind entschieden (siehe „Decided“ oben). Die Quelle „OpenHolidays API (ODbL)“ in der App nennen. Beim Parsen beachten: Einträge haben `regionalScope: "Regional"` neben `nationwide: true`; Zeiträume über 3 Jahre lehnt die API mit HTTP 400 ab (für unser Fenster irrelevant). Der Knopf „Feiertage laden“ geht über den ursprünglichen Plan hinaus (Wunsch des Nutzers). Aufgeteilt in S4a (Fenster laden, speichern, markieren) und S4b (Warnung und Nachladen per Knopf), siehe dort.
+- Added: none (Originalslice); aufgeteilt am 2026-11-20 in S4a und S4b – zu groß für einen Slice (HTTP, Tabelle der geladenen Zeiträume, Fenster laden, Markierung, Warnung und Knopf), eine Demo pro Hälfte ist klarer.
+
+## S4a: Feiertage NRW für das Fenster laden, speichern und markieren
+- Goal: Beim Start holt die App von OpenHolidays die NRW-Feiertage für die letzten 2 Wochen und die nächsten 2 Monate, speichert sie lokal samt Tabelle der geladenen Zeiträume und markiert sie in der Wochenübersicht. Schlägt der Abruf fehl (kein Netz), erscheint nur eine Warnung „Feiertage konnten nicht aktualisiert werden“, die App rechnet weiter und zeigt die gespeicherten Feiertage.
+- Risk: 2 (externe API, im Projekt noch nie angebunden), 3 (HTTP-Aufruf aus Rust neu), 4 (Schema für Feiertage und geladene Zeiträume; S4b und S5 bauen darauf auf)
+- Demo: App mit Netz starten und in eine Woche mit einem NRW-Feiertag im Fenster blättern (z. B. 25.12.2026); der Tag ist als Feiertag markiert. Netz trennen und App neu starten; die gespeicherten Feiertage bleiben markiert, oben erscheint die Warnung, Eingabe und Tagesstunden funktionieren weiter.
+- Tests: Rust-Tests mit gemockter API-Antwort (Parsen inkl. `nationwide`/`regionalScope`, Speichern, Zeitfenster −2 Wochen bis +2 Monate, auch über den Jahreswechsel); Rust-Test für die Tabelle der geladenen Zeiträume (nach dem Laden gilt das Fenster als geladen, auch eine Woche ohne Feiertage); Test für den Ausfall der API (Warnung statt Fehler, gespeicherte Feiertage bleiben); Vue-Tests für die Markierung und die Warnung.
+- Touches: src-tauri/src/store.rs (Schema), neues Modul für den API-Abruf, src-tauri/src/lib.rs (Commands, Aufruf beim Start), src/WeekView.vue, src/components/WeekRow.vue; neue Rust-Abhängigkeit für HTTP
+- Depends on: S2, S3
+- Open: Reihenfolge nach der Speicherung
 - Status: todo
-- Notes: API und Lückenregel sind entschieden (siehe „Decided“ oben). Die Quelle „OpenHolidays API (ODbL)“ in der App nennen. Beim Parsen beachten: Einträge haben `regionalScope: "Regional"` neben `nationwide: true`; Zeiträume über 3 Jahre lehnt die API mit HTTP 400 ab (für unser Fenster irrelevant). Der Knopf „Feiertage laden“ geht über den ursprünglichen Plan hinaus (Wunsch des Nutzers). Wird der Slice zu groß, aufteilen: S4a Fenster laden, speichern, markieren; S4b Warnung und Nachladen per Knopf (jeweils mit eigenem Test und Demo, `S4` dann auf `split`).
+- Added: split from S4 – zu groß für einen Slice; S4a ist der durchgehende Weg API → Speicher → Anzeige.
+- Notes: API und Lückenregel sind entschieden (siehe „Decided“ oben). Die Quelle „OpenHolidays API (ODbL)“ in der App nennen. Beim Parsen beachten: Einträge haben `regionalScope: "Regional"` neben `nationwide: true`; Zeiträume über 3 Jahre lehnt die API mit HTTP 400 ab (für das Fenster irrelevant). Der HTTP-Abruf muss in Tests ersetzbar sein (gemockte Antwort).
+
+## S4b: Warnung für fehlende Feiertage und Nachladen per Knopf
+- Goal: Zeigt die Wochenübersicht eine Woche, für die keine Feiertage geladen wurden (außerhalb des Fensters), erscheint die Warnung „Feiertage für diese Woche fehlen“ mit dem Knopf „Feiertage laden“. Der Klick holt genau diese Woche von OpenHolidays und speichert sie. Ohne Netz bleibt die Warnung, es erscheint eine Meldung, die App rechnet weiter.
+- Risk: none (Kriterien 1 bis 4 geprüft: keine offene Frage, API und Schema stehen seit S4a, keine neue Technik, keine neue Entscheidung, auf der andere Slices aufbauen)
+- Demo: Mit Netz in eine Woche außerhalb des Fensters blättern (z. B. weit zurück oder in 2027, falls außerhalb): Warnung mit Knopf erscheint. Netz trennen, „Feiertage laden“: Meldung, Warnung bleibt, Eingabe funktioniert weiter. Netz wieder an, „Feiertage laden“: Feiertage erscheinen markiert, Warnung verschwindet; nach Neustart bleibt das so. Eine bereits geladene Woche ohne Feiertage zeigt keine Warnung.
+- Tests: Rust-Test, dass für eine Woche ohne Eintrag in der Tabelle der geladenen Zeiträume „fehlt“ gemeldet wird und für eine geladene Woche ohne Feiertage nicht; Rust-Test für das Nachladen einer einzelnen Woche mit gemockter API-Antwort (speichert Feiertage und Zeitraum); Test für den Ausfall der API beim Nachladen (Meldung, nichts gespeichert); Vue-Tests für Warnung, Knopf (Erfolg, Ausfall) und dass die Warnung bei geladenen Wochen fehlt.
+- Touches: src-tauri/src/store.rs, API-Modul aus S4a, src-tauri/src/lib.rs (Command zum Nachladen), src/WeekView.vue
+- Depends on: S4a
+- Open: Reihenfolge nach der Speicherung
+- Status: todo
+- Added: split from S4 – Warnung und Nachladen sind eine eigene, einzeln demonstrierbare Funktion auf S4a.
+- Notes: Der Knopf „Feiertage laden“ geht über den ursprünglichen Plan hinaus (Wunsch des Nutzers). Das Soll wird für Wochen mit fehlenden Feiertagen nicht automatisch gesenkt (betrifft S5).
 
 ## S5: Wochensumme, Soll und Über-/Minusstunden
 - Goal: Pro Woche werden Ist-Summe, Soll (40 h, Feiertage senken es um 8 h pro Feiertag Montag bis Freitag) und der Saldo als Über- oder Minusstunden angezeigt, berechnet im Rust-Backend.
@@ -84,7 +109,7 @@
 - Demo: Woche mit 4 Tagen à 8 h und einem Feiertag eintragen; Soll zeigt 32 h, Saldo 0. Woche ohne Feiertag mit 45 h zeigt +5 h. Woche mit 35 h zeigt −5 h.
 - Tests: Rust-Tests für Ist-Summe, Soll mit 0, 1 und 2 Feiertagen, Saldo positiv, negativ und null; Test, dass ein Feiertag am Wochenende das Soll nicht senkt; Vue-Test für die Anzeige.
 - Touches: none yet (Projekt ist leer)
-- Depends on: S1, S2, S4
+- Depends on: S1, S2, S4a, S4b
 - Open: Feiertage bei Lücken über 2 Wochen
 - Status: todo
 - Notes: Aus dem S2-Review: `Store::between` berechnet die Tagesminuten bei jedem Laden aus den Rohzeiten neu und speichert sie nicht. Ändern sich später die Regeln in `worked_minutes`, ändern sich damit auch alte Wochen. Vor Beginn entscheiden, ob die Minuten beim Speichern mitgespeichert werden (Schema-Änderung, Migration nötig, es gibt noch keine Schema-Version); passt zu "alte Wochen bleiben unverändert".
