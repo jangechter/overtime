@@ -61,8 +61,8 @@
 - Touches: none yet (Projekt ist leer)
 - Depends on: S2
 - Open: Reihenfolge nach der Speicherung
-- Status: todo
-- Notes: none
+- Status: done
+- Notes: Tests grün (Rust 21/21, Vue 32/32), Demo vom Nutzer im Fenster bestätigt. Über den ursprünglichen Plan hinaus gibt es einen „Heute“-Knopf (auf Wunsch des Nutzers), der aus jeder Woche in die aktuelle springt; in der aktuellen Woche lädt er nicht neu.
 
 ## S4: Feiertage NRW laden, speichern und anzeigen
 - Goal: Feiertage für NRW werden über eine öffentliche API für die letzten 2 Wochen und die nächsten 2 Monate geholt, lokal gespeichert und in der Wochenübersicht markiert; ohne Netz erscheint nur eine Warnung.

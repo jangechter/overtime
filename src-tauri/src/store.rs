@@ -238,4 +238,14 @@ mod tests {
         let message = StoreError::Db(rusqlite::Error::InvalidQuery).to_string();
         assert_eq!(message, "Die Datenbank konnte nicht gelesen oder geschrieben werden. Bitte die App neu starten.");
     }
+
+    #[test]
+    fn week_across_the_year_boundary_is_loaded_completely() {
+        let (_dir, store) = open_temp();
+        for date in ["2026-12-27", "2026-12-28", "2026-12-31", "2027-01-01", "2027-01-03", "2027-01-04"] {
+            store.save(date, "08:00", "12:00", 0.0).unwrap();
+        }
+        let dates: Vec<String> = store.between("2026-12-28", "2027-01-03").unwrap().into_iter().map(|e| e.date).collect();
+        assert_eq!(dates, vec!["2026-12-28", "2026-12-31", "2027-01-01", "2027-01-03"]);
+    }
 }

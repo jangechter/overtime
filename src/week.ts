@@ -9,3 +9,9 @@ export function currentWeek(today: Date = new Date()): string[] {
     return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
   });
 }
+
+/** Dieselbe Woche um `weeks` Wochen verschoben (negativ = zurück). */
+export function shiftWeek(week: string[], weeks: number): string[] {
+  const [year, month, day] = week[0].split("-").map(Number);
+  return currentWeek(new Date(year, month - 1, day + weeks * 7));
+}

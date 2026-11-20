@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
+import { computed, onUnmounted, ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 
 export interface StoredEntry {
@@ -9,7 +9,12 @@ export interface StoredEntry {
   minutes: number;
 }
 
-const props = defineProps<{ date: string; entry?: StoredEntry }>();
+const props = defineProps<{
+  date: string;
+  entry?: StoredEntry;
+  /** Meldet einen Fehler, der erst eintrifft, nachdem die Zeile (z. B. durch Blättern) entfernt wurde. */
+  onSaveFailed?: (date: string, message: string) => void;
+}>();
 
 const start = ref(props.entry?.start ?? "");
 const end = ref(props.entry?.end ?? "");
@@ -17,6 +22,10 @@ const breakMinutes = ref(props.entry?.breakMinutes ?? 0);
 const minutes = ref<number | null>(props.entry?.minutes ?? null);
 const error = ref("");
 let stored = props.entry !== undefined;
+let unmounted = false;
+onUnmounted(() => {
+  unmounted = true;
+});
 
 const parsed = computed(() => new Date(`${props.date}T00:00:00`));
 const weekday = computed(() => parsed.value.toLocaleDateString("de-DE", { weekday: "long" }));
@@ -55,8 +64,13 @@ watch([start, end, breakMinutes], async () => {
     error.value = "";
   } catch (e) {
     if (request !== latestRequest) return;
+    const message = stored ? `${String(e)} Der zuletzt gespeicherte Eintrag bleibt erhalten.` : String(e);
+    if (unmounted) {
+      props.onSaveFailed?.(props.date, message);
+      return;
+    }
     minutes.value = null;
-    error.value = stored ? `${String(e)} Der zuletzt gespeicherte Eintrag bleibt erhalten.` : String(e);
+    error.value = message;
   }
 });
 </script>
