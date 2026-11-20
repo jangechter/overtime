@@ -16,7 +16,7 @@
 5. Every added or split slice must meet the same rules: end to end through the entry point, tested, demonstrable.
 
 ## Assumptions
-- Dies ist Plan B von zwei. Er setzt Plan A (`.devkit/tracer-bullets/2026-11-20-overtime-kern.md`) voraus. Die Angabe „Plan A S5" in `Depends on` meint den Slice S5 aus Plan A. Plan A war beim Schreiben noch nicht umgesetzt; wie er Datenmodell und Soll genau speichert, ist hier nicht bekannt und muss vor Beginn gegen den dann vorhandenen Code geprüft werden.
+- Dies ist Plan B von zwei. Er setzt Plan A (`.devkit/tracer-bullets/2026-11-20-overtime-kern.md`) voraus. Die Angabe „Plan A S5" in `Depends on` meint den Slice S5 aus Plan A. Plan A war beim Schreiben noch nicht umgesetzt; wie er Datenmodell und Soll genau speichert, ist hier nicht bekannt und muss vor Beginn gegen den dann vorhandenen Code geprüft werden. Stand 2026-11-20: Plan A S5 ist in S5a (Tagesminuten, Wochensumme) und S5b (Soll, Saldo, eingefrorenes Soll in `week_targets`) aufgeteilt; „Plan A S5“ in `Depends on` meint das Soll aus S5b.
 - Krank/Urlaub ist eine Markierung pro Tag. Ein markierter Tag hat keine Start/Ende-Zeiten, zählt mit 8 h als Ist und hat 8 h Soll, der Saldo des Tages ist 0.
 - Fällt ein Krank/Urlaub-Tag auf einen Feiertag, gilt der Feiertag (Soll 0) und die Markierung ändert nichts. Auf einem Wochenende hat die Markierung keine Wirkung.
 - „Durchschnitt pro Tag" ist der Durchschnitt der Ist-Stunden über alle Arbeitstage des Monats (Montag bis Freitag, ohne Feiertage), die einen Eintrag oder eine Krank/Urlaub-Markierung haben. Tage ohne Eintrag zählen nicht mit.

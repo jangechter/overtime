@@ -11,6 +11,10 @@ use crate::hours::{worked_minutes, HoursError};
 pub enum StoreError {
     Hours(HoursError),
     InvalidDate,
+    /// Beim Umstellen einer älteren Datenbank ließ sich die Arbeitszeit dieses Eintrags (Datum) nicht berechnen.
+    InvalidLegacyEntry(String),
+    /// Die Datenbank hat eine höhere Schema-Version, als diese App kennt.
+    NewerSchema,
     Db(rusqlite::Error),
 }
 
@@ -41,26 +45,13 @@ pub struct Store {
     conn: Connection,
 }
 
+/// Aktuelle Version des Datenbankschemas (`PRAGMA user_version`). 0 heißt: neue Datenbank oder Stand bis S4b ohne Version.
+const SCHEMA_VERSION: i64 = 1;
+
 impl Store {
     pub fn open(path: &Path) -> Result<Store, StoreError> {
-        let conn = Connection::open(path)?;
-        conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS entries (
-                date TEXT PRIMARY KEY,
-                start TEXT NOT NULL,
-                end TEXT NOT NULL,
-                break_minutes INTEGER NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS holidays (
-                date TEXT PRIMARY KEY,
-                name TEXT NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS loaded_ranges (
-                from_date TEXT NOT NULL,
-                to_date TEXT NOT NULL,
-                PRIMARY KEY (from_date, to_date)
-            );",
-        )?;
+        let mut conn = Connection::open(path)?;
+        migrate(&mut conn)?;
         Ok(Store { conn })
     }
 
@@ -69,8 +60,8 @@ impl Store {
         check_date(date)?;
         let minutes = worked_minutes(start, end, break_minutes)?;
         self.conn.execute(
-            "INSERT OR REPLACE INTO entries (date, start, end, break_minutes) VALUES (?1, ?2, ?3, ?4)",
-            (date, start, end, break_minutes as u32),
+            "INSERT OR REPLACE INTO entries (date, start, end, break_minutes, minutes) VALUES (?1, ?2, ?3, ?4, ?5)",
+            (date, start, end, break_minutes as u32, minutes),
         )?;
         Ok(minutes)
     }
@@ -81,23 +72,24 @@ impl Store {
         Ok(())
     }
 
-    /// Einträge von `from` bis `to` (beide einschließlich), nach Datum sortiert.
+    /// Einträge von `from` bis `to` (beide einschließlich), nach Datum sortiert. Die Arbeitsminuten
+    /// sind die beim Speichern berechneten und werden nicht neu berechnet.
     pub fn between(&self, from: &str, to: &str) -> Result<Vec<Entry>, StoreError> {
         check_date(from)?;
         check_date(to)?;
         let mut statement = self.conn.prepare(
-            "SELECT date, start, end, break_minutes FROM entries WHERE date BETWEEN ?1 AND ?2 ORDER BY date",
+            "SELECT date, start, end, break_minutes, minutes FROM entries WHERE date BETWEEN ?1 AND ?2 ORDER BY date",
         )?;
         let rows = statement.query_map([from, to], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, u32>(3)?))
+            Ok(Entry {
+                date: row.get(0)?,
+                start: row.get(1)?,
+                end: row.get(2)?,
+                break_minutes: row.get(3)?,
+                minutes: row.get(4)?,
+            })
         })?;
-        let mut entries = Vec::new();
-        for row in rows {
-            let (date, start, end, break_minutes) = row?;
-            let minutes = worked_minutes(&start, &end, f64::from(break_minutes))?;
-            entries.push(Entry { date, start, end, break_minutes, minutes });
-        }
-        Ok(entries)
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
     /// Ersetzt die Feiertage von `from` bis `to` (beide einschließlich) durch `holidays` und merkt
@@ -140,6 +132,17 @@ impl Store {
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
+    /// Summe der gespeicherten Arbeitsminuten von `from` bis `to` (beide einschließlich).
+    pub fn week_total(&self, from: &str, to: &str) -> Result<u32, StoreError> {
+        check_date(from)?;
+        check_date(to)?;
+        Ok(self.conn.query_row(
+            "SELECT COALESCE(SUM(minutes), 0) FROM entries WHERE date BETWEEN ?1 AND ?2",
+            [from, to],
+            |row| row.get(0),
+        )?)
+    }
+
     /// Feiertage von `from` bis `to` samt Angabe, ob der Zeitraum nie geladen wurde.
     pub fn week_holidays(&self, from: &str, to: &str) -> Result<WeekHolidays, StoreError> {
         Ok(WeekHolidays { holidays: self.holidays_between(from, to)?, missing: !self.is_loaded(from, to)? })
@@ -155,6 +158,60 @@ impl Store {
             |row| row.get(0),
         )?)
     }
+}
+
+/// Bringt die Datenbank auf `SCHEMA_VERSION`, ganz oder gar nicht. Eine Datenbank im Schema bis S4b bekommt die
+/// Spalte `minutes`, die einmal aus den Rohzeiten nachgerechnet wird; danach werden Minuten nie neu berechnet.
+fn migrate(conn: &mut Connection) -> Result<(), StoreError> {
+    let version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    if version > SCHEMA_VERSION {
+        return Err(StoreError::NewerSchema);
+    }
+    if version == SCHEMA_VERSION {
+        return Ok(());
+    }
+    let tx = conn.transaction()?;
+    tx.execute_batch(
+        "CREATE TABLE IF NOT EXISTS entries (
+            date TEXT PRIMARY KEY,
+            start TEXT NOT NULL,
+            end TEXT NOT NULL,
+            break_minutes INTEGER NOT NULL,
+            minutes INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS holidays (
+            date TEXT PRIMARY KEY,
+            name TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS loaded_ranges (
+            from_date TEXT NOT NULL,
+            to_date TEXT NOT NULL,
+            PRIMARY KEY (from_date, to_date)
+        );",
+    )?;
+    let has_minutes: bool = tx.query_row(
+        "SELECT EXISTS (SELECT 1 FROM pragma_table_info('entries') WHERE name = 'minutes')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !has_minutes {
+        tx.execute("ALTER TABLE entries ADD COLUMN minutes INTEGER NOT NULL DEFAULT 0", [])?;
+        let rows = {
+            let mut statement = tx.prepare("SELECT date, start, end, break_minutes FROM entries")?;
+            let rows = statement.query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, u32>(3)?))
+            })?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        };
+        for (date, start, end, break_minutes) in rows {
+            let minutes = worked_minutes(&start, &end, f64::from(break_minutes))
+                .map_err(|_| StoreError::InvalidLegacyEntry(date.clone()))?;
+            tx.execute("UPDATE entries SET minutes = ?1 WHERE date = ?2", (minutes, &date))?;
+        }
+    }
+    tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+    tx.commit()?;
+    Ok(())
 }
 
 /// Existierendes Kalenderdatum im Format `YYYY-MM-DD`.
@@ -202,6 +259,13 @@ impl std::fmt::Display for StoreError {
         match self {
             StoreError::Hours(e) => e.fmt(f),
             StoreError::InvalidDate => f.write_str("Ungültiges Datum, erwartet wird JJJJ-MM-TT."),
+            StoreError::InvalidLegacyEntry(date) => write!(
+                f,
+                "Der gespeicherte Eintrag vom {date} ist ungültig, die Datenbank konnte nicht auf das neue Format umgestellt werden."
+            ),
+            StoreError::NewerSchema => {
+                f.write_str("Die Datenbank stammt aus einer neueren Version der App und kann nicht geöffnet werden.")
+            }
             StoreError::Db(_) => f.write_str(
                 "Die Datenbank konnte nicht gelesen oder geschrieben werden. Bitte die App neu starten.",
             ),
@@ -487,5 +551,155 @@ mod tests {
             Err(StoreError::InvalidDate)
         ));
         assert!(!store.is_loaded("2026-12-06", "2027-02-20").unwrap());
+    }
+
+    fn raw(path: &Path) -> Connection {
+        Connection::open(path).unwrap()
+    }
+
+    fn schema_version(path: &Path) -> i64 {
+        raw(path).query_row("PRAGMA user_version", [], |row| row.get(0)).unwrap()
+    }
+
+    fn has_minutes_column(path: &Path) -> bool {
+        let conn = raw(path);
+        let mut statement = conn.prepare("PRAGMA table_info(entries)").unwrap();
+        let names: Vec<String> = statement.query_map([], |row| row.get(1)).unwrap().map(|name| name.unwrap()).collect();
+        names.iter().any(|name| name == "minutes")
+    }
+
+    /// Datenbank im Schema bis S4b: `entries` ohne `minutes`, keine Schema-Version.
+    fn legacy_db(path: &Path, rows: &[(&str, &str, &str, u32)]) {
+        let conn = raw(path);
+        conn.execute_batch(
+            "CREATE TABLE entries (date TEXT PRIMARY KEY, start TEXT NOT NULL, end TEXT NOT NULL, break_minutes INTEGER NOT NULL);
+            CREATE TABLE holidays (date TEXT PRIMARY KEY, name TEXT NOT NULL);
+            CREATE TABLE loaded_ranges (from_date TEXT NOT NULL, to_date TEXT NOT NULL, PRIMARY KEY (from_date, to_date));
+            INSERT INTO holidays VALUES ('2026-12-25', '1. Weihnachtsfeiertag');
+            INSERT INTO loaded_ranges VALUES ('2026-11-30', '2027-02-21');",
+        )
+        .unwrap();
+        for (date, start, end, break_minutes) in rows {
+            conn.execute(
+                "INSERT INTO entries (date, start, end, break_minutes) VALUES (?1, ?2, ?3, ?4)",
+                (date, start, end, break_minutes),
+            )
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn stored_minutes_are_read_back_without_being_recalculated() {
+        let (_dir, store) = open_temp();
+        store.save("2026-11-16", "08:00", "16:30", 30.0).unwrap();
+        store.conn.execute("UPDATE entries SET minutes = 123 WHERE date = '2026-11-16'", []).unwrap();
+        assert_eq!(store.between("2026-11-16", "2026-11-16").unwrap()[0].minutes, 123);
+    }
+
+    #[test]
+    fn week_total_is_zero_without_entries() {
+        let (_dir, store) = open_temp();
+        assert_eq!(store.week_total("2026-11-16", "2026-11-22").unwrap(), 0);
+    }
+
+    #[test]
+    fn week_total_sums_the_stored_minutes_of_the_week_only() {
+        let (_dir, store) = open_temp();
+        store.save("2026-11-15", "08:00", "12:00", 0.0).unwrap();
+        store.save("2026-11-16", "08:00", "16:30", 30.0).unwrap();
+        store.save("2026-11-18", "09:00", "12:15", 0.0).unwrap();
+        store.save("2026-11-22", "10:00", "11:00", 0.0).unwrap();
+        store.save("2026-11-23", "08:00", "12:00", 0.0).unwrap();
+        assert_eq!(store.week_total("2026-11-16", "2026-11-22").unwrap(), 480 + 195 + 60);
+    }
+
+    #[test]
+    fn week_total_follows_replacing_and_deleting_entries() {
+        let (_dir, store) = open_temp();
+        store.save("2026-11-16", "08:00", "16:30", 30.0).unwrap();
+        store.save("2026-11-17", "08:00", "12:00", 0.0).unwrap();
+        store.save("2026-11-16", "08:00", "10:00", 0.0).unwrap();
+        assert_eq!(store.week_total("2026-11-16", "2026-11-22").unwrap(), 120 + 240);
+        store.delete("2026-11-17").unwrap();
+        assert_eq!(store.week_total("2026-11-16", "2026-11-22").unwrap(), 120);
+    }
+
+    #[test]
+    fn week_total_across_the_year_boundary() {
+        let (_dir, store) = open_temp();
+        for date in ["2026-12-27", "2026-12-28", "2027-01-01", "2027-01-03", "2027-01-04"] {
+            store.save(date, "08:00", "12:00", 0.0).unwrap();
+        }
+        assert_eq!(store.week_total("2026-12-28", "2027-01-03").unwrap(), 3 * 240);
+    }
+
+    #[test]
+    fn week_total_rejects_a_malformed_date() {
+        let (_dir, store) = open_temp();
+        assert!(matches!(store.week_total("morgen", "2026-11-22"), Err(StoreError::InvalidDate)));
+    }
+
+    #[test]
+    fn fresh_database_gets_the_current_schema_version_and_the_minutes_column() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("overtime.db");
+        Store::open(&path).unwrap();
+        assert_eq!(schema_version(&path), 1);
+        assert!(has_minutes_column(&path));
+    }
+
+    #[test]
+    fn database_in_the_old_schema_is_migrated_with_recalculated_minutes_and_keeps_its_other_data() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("overtime.db");
+        legacy_db(&path, &[("2026-11-16", "08:00", "16:30", 30), ("2026-11-17", "09:00", "12:00", 0)]);
+        let store = Store::open(&path).unwrap();
+        assert_eq!(
+            store.between("2026-11-16", "2026-11-22").unwrap(),
+            vec![entry("2026-11-16", "08:00", "16:30", 30, 480), entry("2026-11-17", "09:00", "12:00", 0, 180)]
+        );
+        assert_eq!(store.week_total("2026-11-16", "2026-11-22").unwrap(), 660);
+        assert_eq!(store.holidays_between("2026-12-25", "2026-12-25").unwrap(), vec![holiday("2026-12-25", "1. Weihnachtsfeiertag")]);
+        assert!(store.is_loaded("2026-12-01", "2027-02-01").unwrap());
+        assert_eq!(schema_version(&path), 1);
+    }
+
+    #[test]
+    fn migration_runs_only_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("overtime.db");
+        legacy_db(&path, &[("2026-11-16", "08:00", "16:30", 30)]);
+        Store::open(&path).unwrap();
+        raw(&path).execute("UPDATE entries SET minutes = 999", []).unwrap();
+        let reopened = Store::open(&path).unwrap();
+        assert_eq!(reopened.between("2026-11-16", "2026-11-16").unwrap()[0].minutes, 999);
+    }
+
+    #[test]
+    fn migration_with_an_invalid_row_fails_in_german_and_leaves_the_database_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("overtime.db");
+        legacy_db(&path, &[("2026-11-16", "08:00", "16:30", 30), ("2026-11-17", "16:00", "08:00", 0)]);
+        let error = Store::open(&path).err().unwrap();
+        assert!(matches!(error, StoreError::InvalidLegacyEntry(ref date) if date == "2026-11-17"));
+        assert_eq!(
+            error.to_string(),
+            "Der gespeicherte Eintrag vom 2026-11-17 ist ungültig, die Datenbank konnte nicht auf das neue Format umgestellt werden."
+        );
+        assert_eq!(schema_version(&path), 0);
+        assert!(!has_minutes_column(&path));
+    }
+
+    #[test]
+    fn database_from_a_newer_app_version_is_not_opened_and_not_touched() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("overtime.db");
+        legacy_db(&path, &[]);
+        raw(&path).pragma_update(None, "user_version", 99).unwrap();
+        let error = Store::open(&path).err().unwrap();
+        assert!(matches!(error, StoreError::NewerSchema));
+        assert_eq!(error.to_string(), "Die Datenbank stammt aus einer neueren Version der App und kann nicht geöffnet werden.");
+        assert_eq!(schema_version(&path), 99);
+        assert!(!has_minutes_column(&path));
     }
 }

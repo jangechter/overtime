@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onUnmounted, ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
+import { formatHours } from "../week";
 
 export interface StoredEntry {
   start: string;
@@ -16,6 +17,11 @@ const props = defineProps<{
   holiday?: string;
   /** Meldet einen Fehler, der erst eintrifft, nachdem die Zeile (z. B. durch Blättern) entfernt wurde. */
   onSaveFailed?: (date: string, message: string) => void;
+}>();
+
+const emit = defineEmits<{
+  /** Der gespeicherte Eintrag dieses Tages hat sich geändert (gespeichert oder gelöscht). */
+  saved: [];
 }>();
 
 const start = ref(props.entry?.start ?? "");
@@ -34,11 +40,7 @@ const weekday = computed(() => parsed.value.toLocaleDateString("de-DE", { weekda
 const dateLabel = computed(() =>
   parsed.value.toLocaleDateString("de-DE", { day: "2-digit", month: "2-digit", year: "numeric" }),
 );
-const hoursLabel = computed(() =>
-  minutes.value === null
-    ? ""
-    : `${Math.floor(minutes.value / 60)}:${String(minutes.value % 60).padStart(2, "0")} h`,
-);
+const hoursLabel = computed(() => (minutes.value === null ? "" : formatHours(minutes.value)));
 
 let latestRequest = 0;
 
@@ -51,6 +53,7 @@ watch([start, end, breakMinutes], async () => {
       if (stored) {
         await invoke("delete_entry", { date: props.date });
         stored = false;
+        emit("saved");
       }
       return;
     }
@@ -60,8 +63,10 @@ watch([start, end, breakMinutes], async () => {
       end: end.value,
       breakMinutes: Number(breakMinutes.value) || 0,
     });
-    if (request !== latestRequest) return;
+    // Das Backend hat geschrieben, auch wenn inzwischen eine neuere Eingabe läuft.
     stored = true;
+    emit("saved");
+    if (request !== latestRequest) return;
     minutes.value = result;
     error.value = "";
   } catch (e) {

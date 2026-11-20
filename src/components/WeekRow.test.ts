@@ -56,6 +56,57 @@ describe("WeekRow", () => {
     expect(wrapper.get('[data-test="hours"]').text()).toBe("8:00 h");
   });
 
+  it("meldet nach dem Speichern, dass sich die Tagesstunden geändert haben", async () => {
+    backend = async () => 480;
+    const wrapper = mount(WeekRow, { props: { date: "2026-11-16" } });
+    await fill(wrapper, "08:00", "16:30", "30");
+    expect(wrapper.emitted("saved")).toBeDefined();
+  });
+
+  it("meldet auch, wenn ein gespeicherter Eintrag gelöscht wurde", async () => {
+    backend = async () => 480;
+    const wrapper = mount(WeekRow, { props: { date: "2026-11-16" } });
+    await fill(wrapper, "08:00", "16:30", "30");
+    const before = wrapper.emitted("saved")?.length ?? 0;
+    await wrapper.get('[data-test="end"]').setValue("");
+    await flushPromises();
+    expect(calls).toContainEqual(["delete_entry", { date: "2026-11-16" }]);
+    expect(wrapper.emitted("saved")?.length).toBe(before + 1);
+  });
+
+  it("meldet nichts, wenn das Speichern fehlschlägt", async () => {
+    backend = async () => {
+      throw "Das Ende muss nach dem Start liegen.";
+    };
+    const wrapper = mount(WeekRow, { props: { date: "2026-11-16" } });
+    await fill(wrapper, "16:00", "08:00", "0");
+    expect(wrapper.emitted("saved")).toBeUndefined();
+  });
+
+  it("hält einen überholten, aber erfolgreichen Speichervorgang fest, auch wenn die neuere Eingabe fehlschlägt", async () => {
+    const saves: Array<{ resolve: (minutes: number) => void; reject: (reason: string) => void }> = [];
+    backend = (command) =>
+      command === "save_entry"
+        ? new Promise((resolve, reject) => saves.push({ resolve: resolve as (minutes: number) => void, reject }))
+        : Promise.resolve(undefined);
+    const wrapper = mount(WeekRow, { props: { date: "2026-11-16" } });
+    await wrapper.get('[data-test="start"]').setValue("08:00");
+    await wrapper.get('[data-test="end"]').setValue("16:00");
+    await wrapper.get('[data-test="end"]').setValue("07:00");
+    expect(saves).toHaveLength(2);
+
+    saves[0].resolve(480);
+    await flushPromises();
+    saves[1].reject("Das Ende muss nach dem Start liegen.");
+    await flushPromises();
+    expect(wrapper.emitted("saved")).toBeDefined();
+    expect(wrapper.get('[data-test="error"]').text()).toContain("Der zuletzt gespeicherte Eintrag bleibt erhalten.");
+
+    await wrapper.get('[data-test="end"]').setValue("");
+    await flushPromises();
+    expect(calls).toContainEqual(["delete_entry", { date: "2026-11-16" }]);
+  });
+
   it("zeigt die Meldung des Backends bei ungültiger Eingabe", async () => {
     backend = async () => {
       throw "Das Ende muss nach dem Start liegen.";

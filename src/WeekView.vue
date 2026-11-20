@@ -2,11 +2,13 @@
 import { computed, onMounted, ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import WeekRow, { type StoredEntry } from "./components/WeekRow.vue";
-import { currentWeek, shiftWeek } from "./week";
+import { currentWeek, formatHours, shiftWeek } from "./week";
 
 const days = ref(currentWeek());
 const entries = ref<Record<string, StoredEntry>>({});
 const holidays = ref<Record<string, string>>({});
+/** Ist-Summe der angezeigten Woche in Minuten, berechnet im Backend. */
+const weekTotal = ref(0);
 const loaded = ref(false);
 const loadError = ref("");
 const saveError = ref("");
@@ -17,6 +19,7 @@ const weekFetchError = ref("");
 /** Wochen (Montag), deren Feiertage gerade per Knopf nachgeladen werden. */
 const fetching = ref(new Set<string>());
 let latestRequest = 0;
+let latestTotalRequest = 0;
 
 const formatDate = (date: string) => new Date(`${date}T00:00:00`).toLocaleDateString("de-DE");
 const weekLabel = computed(() => `${formatDate(days.value[0])} – ${formatDate(days.value[6])}`);
@@ -47,6 +50,22 @@ async function reloadHolidays() {
   }
 }
 
+/** Liest die Wochensumme neu (nach Speichern oder Löschen einer Zeile), ohne die Zeilen anzufassen. */
+async function reloadTotal() {
+  const request = ++latestTotalRequest;
+  const weekStart = days.value[0];
+  try {
+    const minutes = await fetchTotal();
+    if (request === latestTotalRequest && days.value[0] === weekStart) weekTotal.value = minutes;
+  } catch (e) {
+    loadError.value = String(e);
+  }
+}
+
+function fetchTotal(): Promise<number> {
+  return invoke<number>("week_total", { from: days.value[0], to: days.value[6] });
+}
+
 async function loadWeek() {
   const request = ++latestRequest;
   loaded.value = false;
@@ -55,16 +74,19 @@ async function loadWeek() {
   weekFetchError.value = "";
   holidaysMissing.value = false;
   try {
-    const [rows, week] = await Promise.all([
+    const [rows, week, minutes] = await Promise.all([
       invoke<Array<StoredEntry & { date: string }>>("load_entries", {
         from: days.value[0],
         to: days.value[6],
       }),
       fetchHolidays(),
+      fetchTotal(),
     ]);
     if (request !== latestRequest) return;
     entries.value = Object.fromEntries(rows.map((row) => [row.date, row]));
     showHolidays(week);
+    latestTotalRequest++;
+    weekTotal.value = minutes;
   } catch (e) {
     if (request !== latestRequest) return;
     loadError.value = String(e);
@@ -134,7 +156,7 @@ onMounted(() => {
     </nav>
     <p v-if="loadError" class="error" data-test="load-error">{{ loadError }}</p>
     <p v-if="saveError" class="error" data-test="save-error">{{ saveError }}</p>
-    <p v-if="holidayWarning" class="warning" data-test="holiday-warning">{{ holidayWarning }}</p>
+    <p v-if="holidayWarning && holidayWarning !== loadError" class="warning" data-test="holiday-warning">{{ holidayWarning }}</p>
     <p v-if="holidaysMissing" class="warning" data-test="holidays-missing">
       Feiertage für diese Woche fehlen.
       <button type="button" data-test="load-holidays" :disabled="fetching.has(days[0])" @click="loadMissingHolidays">
@@ -150,7 +172,9 @@ onMounted(() => {
         :entry="entries[day]"
         :holiday="holidays[day]"
         :on-save-failed="reportSaveFailure"
+        @saved="reloadTotal"
       />
+      <p class="total" data-test="week-total">Wochensumme: {{ formatHours(weekTotal) }}</p>
     </template>
     <footer class="source" data-test="holiday-source">Feiertage: OpenHolidays API (ODbL)</footer>
   </main>
@@ -161,5 +185,6 @@ main { max-width: 56rem; margin: 0 auto; padding: 1rem; font-family: system-ui, 
 .week-nav { display: flex; align-items: center; justify-content: space-between; margin-bottom: 1rem; }
 .error { color: #b00020; }
 .warning { color: #8a5a00; }
+.total { margin-top: 1rem; font-weight: 600; }
 .source { margin-top: 1rem; font-size: 0.8rem; color: #666; }
 </style>

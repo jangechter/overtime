@@ -10,8 +10,9 @@ const lastCall = (command: string) => {
 };
 /** Antwort von `load_holidays`: gespeicherte Feiertage der Woche und ob für sie nie geladen wurde. */
 const holidayAnswer = (holidays: Array<{ date: string; name: string }> = [], missing = false) => ({ holidays, missing });
-/** Standardantwort des Backends: keine Feiertage, nichts fehlt, sonst eine leere Liste. */
-const answer = (command: unknown) => Promise.resolve(command === "load_holidays" ? holidayAnswer() : []);
+/** Standardantwort des Backends: keine Feiertage, nichts fehlt, Wochensumme 0, sonst eine leere Liste. */
+const answer = (command: unknown) =>
+  Promise.resolve(command === "load_holidays" ? holidayAnswer() : command === "week_total" ? 0 : []);
 let backend: (...args: unknown[]) => Promise<unknown> = async (command) => answer(command);
 /** Antwortet nur auf `load_entries` mit `handler`; alle anderen Befehle (Feiertage) bekommen die Standardantwort. */
 const onlyEntries = (handler: (from: string) => Promise<unknown>) => (command: unknown, args: unknown) =>
@@ -212,6 +213,102 @@ describe("WeekView", () => {
     expect(wrapper.find('[data-test="save-error"]').exists()).toBe(false);
   });
 
+  describe("Wochensumme", () => {
+    it("lädt die Summe der angezeigten Woche und zeigt sie an", async () => {
+      const week = currentWeek();
+      backend = (command) => (command === "week_total" ? Promise.resolve(1440) : answer(command));
+      const wrapper = mount(WeekView);
+      await flushPromises();
+      expect(calls).toContainEqual(["week_total", { from: week[0], to: week[6] }]);
+      expect(wrapper.get('[data-test="week-total"]').text()).toContain("24:00 h");
+    });
+
+    it("zeigt eine Woche ohne Einträge mit 0:00 h", async () => {
+      const wrapper = mount(WeekView);
+      await flushPromises();
+      expect(wrapper.get('[data-test="week-total"]').text()).toContain("0:00 h");
+    });
+
+    it("lädt beim Blättern die Summe der neuen Woche", async () => {
+      const week = currentWeek();
+      const previous = shiftWeek(week, -1);
+      backend = (command, args) =>
+        command === "week_total"
+          ? Promise.resolve((args as { from: string }).from === previous[0] ? 600 : 480)
+          : answer(command);
+      const wrapper = mount(WeekView);
+      await flushPromises();
+      expect(wrapper.get('[data-test="week-total"]').text()).toContain("8:00 h");
+      await wrapper.get('[data-test="prev"]').trigger("click");
+      await flushPromises();
+      expect(lastCall("week_total")).toEqual(["week_total", { from: previous[0], to: previous[6] }]);
+      expect(wrapper.get('[data-test="week-total"]').text()).toContain("10:00 h");
+    });
+
+    it("zieht die Summe nach, wenn eine Zeile gespeichert und wieder geleert wird", async () => {
+      let total = 0;
+      backend = (command) => {
+        if (command === "save_entry") {
+          total = 480;
+          return Promise.resolve(480);
+        }
+        if (command === "delete_entry") {
+          total = 0;
+          return Promise.resolve(undefined);
+        }
+        return command === "week_total" ? Promise.resolve(total) : answer(command);
+      };
+      const wrapper = mount(WeekView);
+      await flushPromises();
+      const row = wrapper.findAll(".week-row")[1];
+      await row.get('[data-test="start"]').setValue("08:00");
+      await row.get('[data-test="end"]').setValue("16:00");
+      await flushPromises();
+      expect(wrapper.get('[data-test="week-total"]').text()).toContain("8:00 h");
+      await row.get('[data-test="end"]').setValue("");
+      await flushPromises();
+      expect(wrapper.get('[data-test="week-total"]').text()).toContain("0:00 h");
+    });
+
+    it("übernimmt bei zwei schnell aufeinanderfolgenden Änderungen die zuletzt angeforderte Summe", async () => {
+      const pending: Array<(minutes: number) => void> = [];
+      let initialDone = false;
+      backend = (command) => {
+        if (command === "save_entry") return Promise.resolve(480);
+        if (command === "week_total") {
+          if (!initialDone) {
+            initialDone = true;
+            return Promise.resolve(0);
+          }
+          return new Promise((resolve) => pending.push(resolve as (minutes: number) => void));
+        }
+        return answer(command);
+      };
+      const wrapper = mount(WeekView);
+      await flushPromises();
+      const row = wrapper.findAll(".week-row")[1];
+      await row.get('[data-test="start"]').setValue("08:00");
+      await row.get('[data-test="end"]').setValue("16:00");
+      await flushPromises();
+      await row.get('[data-test="end"]').setValue("17:00");
+      await flushPromises();
+      expect(pending.length).toBeGreaterThanOrEqual(2);
+      pending[pending.length - 1](540);
+      await flushPromises();
+      pending[0](480);
+      await flushPromises();
+      expect(wrapper.get('[data-test="week-total"]').text()).toContain("9:00 h");
+    });
+
+    it("zeigt eine Meldung, wenn die Summe nicht gelesen werden kann", async () => {
+      backend = (command) => (command === "week_total" ? Promise.reject("Datenbank nicht lesbar.") : answer(command));
+      const wrapper = mount(WeekView);
+      await flushPromises();
+      expect(wrapper.get('[data-test="load-error"]').text()).toBe("Datenbank nicht lesbar.");
+      expect(wrapper.find('[data-test="week-total"]').exists()).toBe(false);
+    });
+  });
+
   describe("Feiertage", () => {
     it("aktualisiert die Feiertage beim Start und lädt die der angezeigten Woche", async () => {
       const week = currentWeek();
@@ -368,6 +465,16 @@ describe("WeekView", () => {
       await row.get('[data-test="end"]').setValue("16:30");
       await flushPromises();
       expect(row.get('[data-test="hours"]').text()).toBe("8:00 h");
+    });
+
+    it("zeigt dieselbe Meldung nicht zusätzlich als Warnung, wenn die Datenbank nicht geöffnet werden konnte", async () => {
+      const message = "Die Datenbank stammt aus einer neueren Version der App und kann nicht geöffnet werden.";
+      backend = () => Promise.reject(message);
+      const wrapper = mount(WeekView);
+      await flushPromises();
+      expect(wrapper.get('[data-test="load-error"]').text()).toBe(message);
+      expect(wrapper.find('[data-test="holiday-warning"]').exists()).toBe(false);
+      expect(wrapper.findAll(".week-row")).toHaveLength(0);
     });
 
     it("lässt die Warnung beim Blättern stehen", async () => {

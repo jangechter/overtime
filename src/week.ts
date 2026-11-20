@@ -15,3 +15,8 @@ export function shiftWeek(week: string[], weeks: number): string[] {
   const [year, month, day] = week[0].split("-").map(Number);
   return currentWeek(new Date(year, month - 1, day + weeks * 7));
 }
+
+/** Minuten als `H:MM h`, z. B. 480 → „8:00 h“. */
+export function formatHours(minutes: number): string {
+  return `${Math.floor(minutes / 60)}:${pad(minutes % 60)} h`;
+}

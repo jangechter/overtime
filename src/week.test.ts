@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { currentWeek, shiftWeek } from "./week";
+import { currentWeek, formatHours, shiftWeek } from "./week";
 
 describe("currentWeek", () => {
   it("liefert Montag bis Sonntag mitten in der Woche", () => {
@@ -46,5 +46,17 @@ describe("shiftWeek", () => {
 
   it("bleibt bei 0 Wochen unverändert", () => {
     expect(shiftWeek(week, 0)).toEqual(week);
+  });
+});
+
+describe("formatHours", () => {
+  it("zeigt Stunden und zweistellige Minuten", () => {
+    expect(formatHours(480)).toBe("8:00 h");
+    expect(formatHours(59)).toBe("0:59 h");
+    expect(formatHours(1445)).toBe("24:05 h");
+  });
+
+  it("zeigt 0 Minuten als 0:00 h", () => {
+    expect(formatHours(0)).toBe("0:00 h");
   });
 });
