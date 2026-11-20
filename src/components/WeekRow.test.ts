@@ -29,6 +29,25 @@ describe("WeekRow", () => {
     expect(wrapper.text()).toContain("16.11.2026");
   });
 
+  it("markiert einen Feiertag mit seinem Namen", () => {
+    const wrapper = mount(WeekRow, { props: { date: "2026-12-25", holiday: "1. Weihnachtsfeiertag" } });
+    expect(wrapper.get('[data-test="holiday"]').text()).toBe("1. Weihnachtsfeiertag");
+    expect(wrapper.classes()).toContain("is-holiday");
+  });
+
+  it("markiert einen normalen Tag nicht als Feiertag", () => {
+    const wrapper = mount(WeekRow, { props: { date: "2026-11-16" } });
+    expect(wrapper.find('[data-test="holiday"]').exists()).toBe(false);
+    expect(wrapper.classes()).not.toContain("is-holiday");
+  });
+
+  it("erlaubt an einem Feiertag weiterhin Eingaben", async () => {
+    backend = async () => 480;
+    const wrapper = mount(WeekRow, { props: { date: "2026-12-25", holiday: "1. Weihnachtsfeiertag" } });
+    await fill(wrapper, "08:00", "16:30", "30");
+    expect(wrapper.get('[data-test="hours"]').text()).toBe("8:00 h");
+  });
+
   it("zeigt die vom Backend berechnete Tagesstunde", async () => {
     backend = async () => 480;
     const wrapper = mount(WeekRow, { props: { date: "2026-11-16" } });

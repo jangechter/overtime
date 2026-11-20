@@ -1,18 +1,22 @@
+pub mod holidays;
 pub mod hours;
 pub mod store;
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use tauri::Manager;
 
-use store::{Entry, Store};
+use holidays::OpenHolidays;
+use store::{Entry, Holiday, Store};
 
-struct AppStore(Mutex<Store>);
+pub(crate) const STORE_UNAVAILABLE: &str = "Interner Fehler: Der Datenspeicher ist nicht verfügbar. Bitte die App neu starten.";
+
+struct AppStore(Arc<Mutex<Store>>);
 
 fn lock<'a>(state: &'a tauri::State<AppStore>) -> Result<std::sync::MutexGuard<'a, Store>, String> {
     state.0.lock().map_err(|e| {
         eprintln!("Sperre des Datenspeichers fehlgeschlagen: {e}");
-        "Interner Fehler: Der Datenspeicher ist nicht verfügbar. Bitte die App neu starten.".to_string()
+        STORE_UNAVAILABLE.to_string()
     })
 }
 
@@ -40,6 +44,27 @@ fn load_entries(state: tauri::State<AppStore>, from: String, to: String) -> Resu
     store.between(&from, &to).map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+fn load_holidays(state: tauri::State<AppStore>, from: String, to: String) -> Result<Vec<Holiday>, String> {
+    let store = lock(&state)?;
+    store.holidays_between(&from, &to).map_err(|e| e.to_string())
+}
+
+/// Holt die Feiertage für das Fenster um heute. Der Abruf läuft in einem eigenen Thread, damit das Fenster nicht einfriert.
+#[tauri::command]
+async fn refresh_holidays(state: tauri::State<'_, AppStore>) -> Result<(), String> {
+    let store = Arc::clone(&state.0);
+    let today = chrono::Local::now().date_naive();
+    tauri::async_runtime::spawn_blocking(move || holidays::refresh(&store, &OpenHolidays, today))
+        .await
+        .map_err(|e| holidays::HolidayError::Fetch(e.to_string()))
+        .and_then(|result| result)
+        .map_err(|e| {
+            eprintln!("Feiertage konnten nicht aktualisiert werden: {e:?}");
+            e.to_string()
+        })
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -47,10 +72,10 @@ pub fn run() {
             let dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&dir)?;
             let store = Store::open(&dir.join("overtime.db")).map_err(|e| e.to_string())?;
-            app.manage(AppStore(Mutex::new(store)));
+            app.manage(AppStore(Arc::new(Mutex::new(store))));
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![save_entry, delete_entry, load_entries])
+        .invoke_handler(tauri::generate_handler![save_entry, delete_entry, load_entries, load_holidays, refresh_holidays])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

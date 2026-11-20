@@ -24,6 +24,12 @@ pub struct Entry {
     pub minutes: u32,
 }
 
+#[derive(Debug, PartialEq, Eq, Serialize)]
+pub struct Holiday {
+    pub date: String,
+    pub name: String,
+}
+
 pub struct Store {
     conn: Connection,
 }
@@ -37,7 +43,16 @@ impl Store {
                 start TEXT NOT NULL,
                 end TEXT NOT NULL,
                 break_minutes INTEGER NOT NULL
-            )",
+            );
+            CREATE TABLE IF NOT EXISTS holidays (
+                date TEXT PRIMARY KEY,
+                name TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS loaded_ranges (
+                from_date TEXT NOT NULL,
+                to_date TEXT NOT NULL,
+                PRIMARY KEY (from_date, to_date)
+            );",
         )?;
         Ok(Store { conn })
     }
@@ -76,6 +91,57 @@ impl Store {
             entries.push(Entry { date, start, end, break_minutes, minutes });
         }
         Ok(entries)
+    }
+
+    /// Ersetzt die Feiertage von `from` bis `to` (beide einschließlich) durch `holidays` und merkt
+    /// den Zeitraum als geladen, auch wenn er keinen Feiertag enthält.
+    pub fn save_holidays(&mut self, from: &str, to: &str, holidays: &[Holiday]) -> Result<(), StoreError> {
+        check_date(from)?;
+        check_date(to)?;
+        for holiday in holidays {
+            check_date(&holiday.date)?;
+        }
+        let tx = self.conn.transaction()?;
+        tx.execute("DELETE FROM holidays WHERE date BETWEEN ?1 AND ?2", [from, to])?;
+        for holiday in holidays {
+            tx.execute("INSERT OR REPLACE INTO holidays (date, name) VALUES (?1, ?2)", [&holiday.date, &holiday.name])?;
+        }
+        // Überlappende Zeiträume zu einem zusammenfassen, damit die Tabelle nicht mit jedem Starttag wächst.
+        // Nur aneinandergrenzende (z. B. Sonntag/Montag) werden nicht zusammengefasst.
+        let (merged_from, merged_to): (String, String) = tx.query_row(
+            "SELECT MIN(from_date), MAX(to_date) FROM (
+                SELECT ?1 AS from_date, ?2 AS to_date
+                UNION ALL
+                SELECT from_date, to_date FROM loaded_ranges WHERE from_date <= ?2 AND to_date >= ?1
+            )",
+            [from, to],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        tx.execute("DELETE FROM loaded_ranges WHERE from_date <= ?2 AND to_date >= ?1", [from, to])?;
+        tx.execute("INSERT INTO loaded_ranges (from_date, to_date) VALUES (?1, ?2)", [&merged_from, &merged_to])?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Feiertage von `from` bis `to` (beide einschließlich), nach Datum sortiert.
+    pub fn holidays_between(&self, from: &str, to: &str) -> Result<Vec<Holiday>, StoreError> {
+        check_date(from)?;
+        check_date(to)?;
+        let mut statement =
+            self.conn.prepare("SELECT date, name FROM holidays WHERE date BETWEEN ?1 AND ?2 ORDER BY date")?;
+        let rows = statement.query_map([from, to], |row| Ok(Holiday { date: row.get(0)?, name: row.get(1)? }))?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// Ob ein einzelner geladener Zeitraum `from` bis `to` vollständig abdeckt.
+    pub fn is_loaded(&self, from: &str, to: &str) -> Result<bool, StoreError> {
+        check_date(from)?;
+        check_date(to)?;
+        Ok(self.conn.query_row(
+            "SELECT EXISTS (SELECT 1 FROM loaded_ranges WHERE from_date <= ?1 AND to_date >= ?2)",
+            [from, to],
+            |row| row.get(0),
+        )?)
     }
 }
 
@@ -247,5 +313,124 @@ mod tests {
         }
         let dates: Vec<String> = store.between("2026-12-28", "2027-01-03").unwrap().into_iter().map(|e| e.date).collect();
         assert_eq!(dates, vec!["2026-12-28", "2026-12-31", "2027-01-01", "2027-01-03"]);
+    }
+
+    fn holiday(date: &str, name: &str) -> Holiday {
+        Holiday { date: date.into(), name: name.into() }
+    }
+
+    #[test]
+    fn saved_holidays_are_read_back_within_the_range_sorted_by_date() {
+        let (_dir, mut store) = open_temp();
+        store
+            .save_holidays(
+                "2026-12-06",
+                "2027-02-20",
+                &[holiday("2027-01-01", "Neujahr"), holiday("2026-12-25", "1. Weihnachtsfeiertag")],
+            )
+            .unwrap();
+        assert_eq!(
+            store.holidays_between("2026-12-21", "2027-01-03").unwrap(),
+            vec![holiday("2026-12-25", "1. Weihnachtsfeiertag"), holiday("2027-01-01", "Neujahr")]
+        );
+        assert_eq!(store.holidays_between("2026-12-26", "2026-12-31").unwrap(), vec![]);
+    }
+
+    #[test]
+    fn saving_a_window_again_replaces_its_holidays_but_keeps_those_outside() {
+        let (_dir, mut store) = open_temp();
+        store.save_holidays("2026-05-01", "2026-05-31", &[holiday("2026-05-14", "Christi Himmelfahrt")]).unwrap();
+        store.save_holidays("2026-12-06", "2026-12-31", &[holiday("2026-12-25", "Alt")]).unwrap();
+        store.save_holidays("2026-12-06", "2026-12-31", &[holiday("2026-12-26", "Neu")]).unwrap();
+        assert_eq!(
+            store.holidays_between("2026-01-01", "2026-12-31").unwrap(),
+            vec![holiday("2026-05-14", "Christi Himmelfahrt"), holiday("2026-12-26", "Neu")]
+        );
+    }
+
+    #[test]
+    fn holidays_and_loaded_ranges_survive_reopening_the_database() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("overtime.db");
+        Store::open(&path)
+            .unwrap()
+            .save_holidays("2026-12-06", "2027-02-20", &[holiday("2026-12-25", "1. Weihnachtsfeiertag")])
+            .unwrap();
+        let reopened = Store::open(&path).unwrap();
+        assert_eq!(reopened.holidays_between("2026-12-25", "2026-12-25").unwrap().len(), 1);
+        assert!(reopened.is_loaded("2026-12-14", "2026-12-20").unwrap());
+    }
+
+    #[test]
+    fn week_without_holidays_counts_as_loaded_inside_a_saved_window() {
+        let (_dir, mut store) = open_temp();
+        store.save_holidays("2026-11-06", "2027-01-20", &[holiday("2026-12-25", "1. Weihnachtsfeiertag")]).unwrap();
+        assert!(store.is_loaded("2026-11-09", "2026-11-15").unwrap());
+        assert!(store.is_loaded("2026-11-06", "2027-01-20").unwrap());
+    }
+
+    #[test]
+    fn range_that_was_never_loaded_does_not_count_as_loaded() {
+        let (_dir, mut store) = open_temp();
+        assert!(!store.is_loaded("2026-11-09", "2026-11-15").unwrap());
+        store.save_holidays("2026-11-06", "2027-01-20", &[]).unwrap();
+        assert!(!store.is_loaded("2027-03-01", "2027-03-07").unwrap());
+        assert!(!store.is_loaded("2026-11-02", "2026-11-08").unwrap(), "Woche ragt vor das Fenster");
+        assert!(!store.is_loaded("2027-01-18", "2027-01-24").unwrap(), "Woche ragt hinter das Fenster");
+    }
+
+    fn loaded_range_count(store: &Store) -> u32 {
+        store.conn.query_row("SELECT COUNT(*) FROM loaded_ranges", [], |row| row.get(0)).unwrap()
+    }
+
+    #[test]
+    fn overlapping_windows_are_merged_into_one_loaded_range() {
+        let (_dir, mut store) = open_temp();
+        store.save_holidays("2027-01-01", "2027-01-10", &[]).unwrap();
+        assert!(!store.is_loaded("2027-01-04", "2027-01-15").unwrap());
+        store.save_holidays("2027-01-08", "2027-01-20", &[]).unwrap();
+        assert!(store.is_loaded("2027-01-04", "2027-01-15").unwrap(), "Woche liegt nur in der Vereinigung beider Fenster");
+        assert_eq!(loaded_range_count(&store), 1);
+    }
+
+    #[test]
+    fn daily_sliding_window_keeps_a_single_loaded_range() {
+        let (_dir, mut store) = open_temp();
+        store.save_holidays("2026-11-06", "2027-01-20", &[]).unwrap();
+        store.save_holidays("2026-11-07", "2027-01-21", &[]).unwrap();
+        store.save_holidays("2026-11-08", "2027-01-22", &[]).unwrap();
+        assert_eq!(loaded_range_count(&store), 1);
+        assert!(store.is_loaded("2026-11-06", "2027-01-22").unwrap());
+    }
+
+    #[test]
+    fn windows_that_do_not_overlap_stay_separate_ranges() {
+        let (_dir, mut store) = open_temp();
+        store.save_holidays("2026-11-06", "2026-11-20", &[]).unwrap();
+        store.save_holidays("2027-03-01", "2027-03-14", &[]).unwrap();
+        assert_eq!(loaded_range_count(&store), 2);
+        assert!(!store.is_loaded("2026-11-18", "2027-03-02").unwrap(), "die Lücke dazwischen ist nicht geladen");
+    }
+
+    #[test]
+    fn merging_ranges_keeps_the_holidays_of_all_windows() {
+        let (_dir, mut store) = open_temp();
+        store.save_holidays("2026-12-06", "2026-12-28", &[holiday("2026-12-25", "1. Weihnachtsfeiertag")]).unwrap();
+        store.save_holidays("2026-12-28", "2027-02-20", &[holiday("2027-01-01", "Neujahr")]).unwrap();
+        assert_eq!(
+            store.holidays_between("2026-12-01", "2027-02-28").unwrap(),
+            vec![holiday("2026-12-25", "1. Weihnachtsfeiertag"), holiday("2027-01-01", "Neujahr")]
+        );
+    }
+
+    #[test]
+    fn saving_holidays_with_a_malformed_date_is_rejected_and_stores_nothing() {
+        let (_dir, mut store) = open_temp();
+        assert!(matches!(store.save_holidays("morgen", "2027-02-20", &[]), Err(StoreError::InvalidDate)));
+        assert!(matches!(
+            store.save_holidays("2026-12-06", "2027-02-20", &[holiday("25.12.2026", "Weihnachten")]),
+            Err(StoreError::InvalidDate)
+        ));
+        assert!(!store.is_loaded("2026-12-06", "2027-02-20").unwrap());
     }
 }

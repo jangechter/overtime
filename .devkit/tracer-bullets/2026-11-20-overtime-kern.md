@@ -87,9 +87,10 @@
 - Touches: src-tauri/src/store.rs (Schema), neues Modul für den API-Abruf, src-tauri/src/lib.rs (Commands, Aufruf beim Start), src/WeekView.vue, src/components/WeekRow.vue; neue Rust-Abhängigkeit für HTTP
 - Depends on: S2, S3
 - Open: Reihenfolge nach der Speicherung
-- Status: todo
+- Status: done
 - Added: split from S4 – zu groß für einen Slice; S4a ist der durchgehende Weg API → Speicher → Anzeige.
 - Notes: API und Lückenregel sind entschieden (siehe „Decided“ oben). Die Quelle „OpenHolidays API (ODbL)“ in der App nennen. Beim Parsen beachten: Einträge haben `regionalScope: "Regional"` neben `nationwide: true`; Zeiträume über 3 Jahre lehnt die API mit HTTP 400 ab (für das Fenster irrelevant). Der HTTP-Abruf muss in Tests ersetzbar sein (gemockte Antwort).
+  Tests grün (Rust 45/45 plus 1 ignorierter Live-Test, Vue 46/46, `npm run build` und `cargo build` ohne Fehler); echter Abruf einmal mit `cargo test live_refresh -- --ignored` gegen OpenHolidays geprüft (3 Feiertage für 2026-12-06 bis 2027-02-20). Demo vom Nutzer im Fenster bestätigt. HTTP über `ureq` (10 s Timeout), Daten über `chrono`. Der Abruf läuft in einem eigenen Thread (`spawn_blocking`) und sperrt den Datenspeicher erst zum Speichern. Es zählt nur `startDate` (öffentliche Feiertage sind eintägig). `save_holidays` fasst überlappende geladene Zeiträume zu einem zusammen (aus dem Review: die Tabelle wuchs sonst mit jedem Starttag, und eine nur von mehreren Fenstern gemeinsam abgedeckte Woche hätte als „nie geladen“ gegolten); `Store::is_loaded` prüft, ob ein einzelner Zeitraum die Woche abdeckt. Nur aneinandergrenzende, nicht überlappende Zeiträume (z. B. Sonntag/Montag) werden nicht zusammengefasst; S4b muss das bei nachgeladenen einzelnen Wochen beachten.
 
 ## S4b: Warnung für fehlende Feiertage und Nachladen per Knopf
 - Goal: Zeigt die Wochenübersicht eine Woche, für die keine Feiertage geladen wurden (außerhalb des Fensters), erscheint die Warnung „Feiertage für diese Woche fehlen“ mit dem Knopf „Feiertage laden“. Der Klick holt genau diese Woche von OpenHolidays und speichert sie. Ohne Netz bleibt die Warnung, es erscheint eine Meldung, die App rechnet weiter.
@@ -113,3 +114,4 @@
 - Open: Feiertage bei Lücken über 2 Wochen
 - Status: todo
 - Notes: Aus dem S2-Review: `Store::between` berechnet die Tagesminuten bei jedem Laden aus den Rohzeiten neu und speichert sie nicht. Ändern sich später die Regeln in `worked_minutes`, ändern sich damit auch alte Wochen. Vor Beginn entscheiden, ob die Minuten beim Speichern mitgespeichert werden (Schema-Änderung, Migration nötig, es gibt noch keine Schema-Version); passt zu "alte Wochen bleiben unverändert".
+  Aus dem S4a-Review: Der Abruf beim Start ersetzt die gespeicherten Feiertage ab heute −14 Tage (`Store::save_holidays`). Das Soll abgeschlossener Wochen darf deshalb nicht live aus der Tabelle `holidays` berechnet werden, sonst ändert eine Korrektur der API es rückwirkend (widerspricht „alte Wochen werden nie rückwirkend neu berechnet“). Entweder das Soll beim Speichern der Woche mitspeichern (wie die Tagesminuten oben) oder Feiertage vor der aktuellen Woche als schreibgeschützt behandeln. Vor Beginn mit der Entscheidung zu den Tagesminuten zusammen klären.

@@ -12,6 +12,8 @@ export interface StoredEntry {
 const props = defineProps<{
   date: string;
   entry?: StoredEntry;
+  /** Name des Feiertags, falls der Tag einer ist. */
+  holiday?: string;
   /** Meldet einen Fehler, der erst eintrifft, nachdem die Zeile (z. B. durch Blättern) entfernt wurde. */
   onSaveFailed?: (date: string, message: string) => void;
 }>();
@@ -76,11 +78,12 @@ watch([start, end, breakMinutes], async () => {
 </script>
 
 <template>
-  <div class="week-row">
+  <div class="week-row" :class="{ 'is-holiday': holiday }">
     <div class="day">
       <strong>{{ weekday }}</strong>
       <span>{{ dateLabel }}</span>
     </div>
+    <span v-if="holiday" class="holiday" data-test="holiday">{{ holiday }}</span>
     <label>Start <input v-model="start" type="text" inputmode="numeric" placeholder="HH:MM" maxlength="5" data-test="start" /></label>
     <label>Ende <input v-model="end" type="text" inputmode="numeric" placeholder="HH:MM" maxlength="5" data-test="end" /></label>
     <label>Pause (Min) <input v-model="breakMinutes" type="number" min="0" data-test="break" /></label>
@@ -93,6 +96,8 @@ watch([start, end, breakMinutes], async () => {
 .week-row { display: flex; align-items: center; gap: 1rem; padding: 0.5rem 0; border-bottom: 1px solid #ddd; }
 .day { display: flex; flex-direction: column; width: 8rem; }
 .hours { font-weight: 600; }
+.is-holiday { background: #fff4d6; }
+.holiday { font-weight: 600; color: #8a5a00; width: 10rem; }
 .error { color: #b00020; }
 input[type="number"] { width: 4rem; }
 input[type="text"] { width: 4.5rem; }
