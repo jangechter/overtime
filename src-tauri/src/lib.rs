@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use tauri::Manager;
 
 use holidays::OpenHolidays;
-use store::{Entry, Holiday, Store};
+use store::{Entry, Store, WeekHolidays};
 
 pub(crate) const STORE_UNAVAILABLE: &str = "Interner Fehler: Der Datenspeicher ist nicht verfügbar. Bitte die App neu starten.";
 
@@ -45,9 +45,9 @@ fn load_entries(state: tauri::State<AppStore>, from: String, to: String) -> Resu
 }
 
 #[tauri::command]
-fn load_holidays(state: tauri::State<AppStore>, from: String, to: String) -> Result<Vec<Holiday>, String> {
+fn load_holidays(state: tauri::State<AppStore>, from: String, to: String) -> Result<WeekHolidays, String> {
     let store = lock(&state)?;
-    store.holidays_between(&from, &to).map_err(|e| e.to_string())
+    store.week_holidays(&from, &to).map_err(|e| e.to_string())
 }
 
 /// Holt die Feiertage für das Fenster um heute. Der Abruf läuft in einem eigenen Thread, damit das Fenster nicht einfriert.
@@ -65,6 +65,20 @@ async fn refresh_holidays(state: tauri::State<'_, AppStore>) -> Result<(), Strin
         })
 }
 
+/// Holt die Feiertage genau der Woche, in der `date` liegt (Knopf „Feiertage laden“), ebenfalls in einem eigenen Thread.
+#[tauri::command]
+async fn fetch_week_holidays(state: tauri::State<'_, AppStore>, date: String) -> Result<(), String> {
+    let store = Arc::clone(&state.0);
+    tauri::async_runtime::spawn_blocking(move || holidays::load_week(&store, &OpenHolidays, &date))
+        .await
+        .map_err(|e| holidays::HolidayError::WeekUnavailable(e.to_string()))
+        .and_then(|result| result)
+        .map_err(|e| {
+            eprintln!("Feiertage der Woche konnten nicht geladen werden: {e:?}");
+            e.to_string()
+        })
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -75,7 +89,7 @@ pub fn run() {
             app.manage(AppStore(Arc::new(Mutex::new(store))));
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![save_entry, delete_entry, load_entries, load_holidays, refresh_holidays])
+        .invoke_handler(tauri::generate_handler![save_entry, delete_entry, load_entries, load_holidays, refresh_holidays, fetch_week_holidays])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

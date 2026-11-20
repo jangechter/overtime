@@ -1,12 +1,12 @@
 //! Feiertage NRW von OpenHolidays: Zeitfenster, Abruf, Parsen und Aktualisieren des Speichers.
 
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
 
-use chrono::{Days, Months, NaiveDate};
+use chrono::{Datelike, Days, Months, NaiveDate};
 use serde::Deserialize;
 
-use crate::store::{Holiday, Store, StoreError};
+use crate::store::{check_date, Holiday, Store, StoreError};
 
 #[derive(Debug)]
 pub enum HolidayError {
@@ -15,6 +15,8 @@ pub enum HolidayError {
     /// Antwort der API nicht lesbar.
     Parse(String),
     Store(StoreError),
+    /// Das Nachladen einer einzelnen Woche ist gescheitert (kein Netz oder unlesbare Antwort).
+    WeekUnavailable(String),
     /// Der Datenspeicher ist durch einen früheren Fehler gesperrt.
     StoreUnavailable,
 }
@@ -45,9 +47,14 @@ impl HolidayApi for OpenHolidays {
     }
 }
 
-/// Das Fenster beim Start: 2 Wochen zurück bis 2 Monate voraus, als `(von, bis)` im Format `YYYY-MM-DD`.
+/// Das Fenster beim Start: 2 Wochen zurück bis 2 Monate voraus, nach außen auf volle Wochen (Montag bis Sonntag)
+/// erweitert, damit die Randwochen nicht als „nie geladen“ gelten. Als `(von, bis)` im Format `YYYY-MM-DD`.
 pub fn window(today: NaiveDate) -> (String, String) {
-    (format_date(today - Days::new(14)), format_date(today + Months::new(2)))
+    let start = today - Days::new(14);
+    let end = today + Months::new(2);
+    let monday = start - Days::new(u64::from(start.weekday().num_days_from_monday()));
+    let sunday = end + Days::new(u64::from(6 - end.weekday().num_days_from_monday()));
+    (format_date(monday), format_date(sunday))
 }
 
 fn format_date(date: NaiveDate) -> String {
@@ -100,13 +107,42 @@ fn parse(json: &str) -> Result<Vec<Holiday>, HolidayError> {
 /// Der Datenspeicher wird erst nach dem Abruf gesperrt, damit Eingaben währenddessen nicht warten.
 pub fn refresh(store: &Mutex<Store>, api: &dyn HolidayApi, today: NaiveDate) -> Result<(), HolidayError> {
     let (from, to) = window(today);
-    let holidays = parse(&api.fetch(&from, &to)?)?;
-    let mut store = store.lock().map_err(|e| {
+    fetch_and_save(store, api, &from, &to)
+}
+
+/// Montag und Sonntag der Woche, in der `date` liegt, als `(von, bis)` im Format `YYYY-MM-DD`.
+pub fn week_of(date: &str) -> Result<(String, String), HolidayError> {
+    check_date(date)?;
+    let day = NaiveDate::parse_from_str(date, "%Y-%m-%d").map_err(|_| StoreError::InvalidDate)?;
+    let monday = day - Days::new(u64::from(day.weekday().num_days_from_monday()));
+    Ok((format_date(monday), format_date(monday + Days::new(6))))
+}
+
+/// Holt genau die Woche, in der `date` liegt, von `api` und ersetzt damit ihre gespeicherten Feiertage.
+/// Eine Woche, die schon vollständig geladen ist, bleibt unberührt (kein Abruf), damit alte Wochen
+/// nicht nachträglich überschrieben werden.
+pub fn load_week(store: &Mutex<Store>, api: &dyn HolidayApi, date: &str) -> Result<(), HolidayError> {
+    let (from, to) = week_of(date)?;
+    if lock(store)?.is_loaded(&from, &to)? {
+        return Ok(());
+    }
+    fetch_and_save(store, api, &from, &to).map_err(|e| match e {
+        HolidayError::Fetch(detail) | HolidayError::Parse(detail) => HolidayError::WeekUnavailable(detail),
+        other => other,
+    })
+}
+
+fn fetch_and_save(store: &Mutex<Store>, api: &dyn HolidayApi, from: &str, to: &str) -> Result<(), HolidayError> {
+    let holidays = parse(&api.fetch(from, to)?)?;
+    lock(store)?.save_holidays(from, to, &holidays)?;
+    Ok(())
+}
+
+fn lock(store: &Mutex<Store>) -> Result<MutexGuard<'_, Store>, HolidayError> {
+    store.lock().map_err(|e| {
         eprintln!("Sperre des Datenspeichers fehlgeschlagen: {e}");
         HolidayError::StoreUnavailable
-    })?;
-    store.save_holidays(&from, &to, &holidays)?;
-    Ok(())
+    })
 }
 
 impl std::fmt::Display for HolidayError {
@@ -114,6 +150,7 @@ impl std::fmt::Display for HolidayError {
         match self {
             HolidayError::Fetch(_) | HolidayError::Parse(_) => f.write_str("Feiertage konnten nicht aktualisiert werden."),
             HolidayError::Store(e) => e.fmt(f),
+            HolidayError::WeekUnavailable(_) => f.write_str("Feiertage für diese Woche konnten nicht geladen werden."),
             HolidayError::StoreUnavailable => f.write_str(crate::STORE_UNAVAILABLE),
         }
     }
@@ -123,7 +160,10 @@ impl std::fmt::Display for HolidayError {
 mod tests {
     use std::cell::RefCell;
 
+    use chrono::Weekday;
+
     use super::*;
+    use crate::store::WeekHolidays;
 
     const CHRISTMAS: &str = r#"{"id":"b37c8536-925e-455c-9e61-8e2b984a74d1","startDate":"2026-12-25","endDate":"2026-12-25","type":"Public","name":[{"language":"DE","text":"1. Weihnachtsfeiertag"}],"regionalScope":"Regional","temporalScope":"FullDay","nationwide":true}"#;
     const NEW_YEAR: &str = r#"{"id":"a9951b88-fbfa-4634-8b80-39c60abb2a0c","startDate":"2027-01-01","endDate":"2027-01-01","type":"Public","name":[{"language":"DE","text":"Neujahr"}],"regionalScope":"Regional","temporalScope":"FullDay","nationwide":true}"#;
@@ -167,20 +207,31 @@ mod tests {
     }
 
     #[test]
-    fn window_reaches_two_weeks_back_and_two_months_ahead() {
-        assert_eq!(window(date("2026-11-20")), ("2026-11-06".to_string(), "2027-01-20".to_string()));
+    fn window_reaches_two_weeks_back_and_two_months_ahead_rounded_out_to_whole_weeks() {
+        // Heute Freitag 20.11.: −2 Wochen = Freitag 6.11. (Montag davor: 2.11.), +2 Monate = Mittwoch 20.1. (Sonntag danach: 24.1.)
+        assert_eq!(window(date("2026-11-20")), ("2026-11-02".to_string(), "2027-01-24".to_string()));
+    }
+
+    #[test]
+    fn window_always_starts_on_a_monday_and_ends_on_a_sunday() {
+        for offset in 0..14 {
+            let today = date("2026-11-16") + Days::new(offset);
+            let (from, to) = window(today);
+            assert_eq!(date(&from).weekday(), Weekday::Mon, "{today}");
+            assert_eq!(date(&to).weekday(), Weekday::Sun, "{today}");
+        }
     }
 
     #[test]
     fn window_spans_the_year_boundary() {
-        assert_eq!(window(date("2026-12-20")), ("2026-12-06".to_string(), "2027-02-20".to_string()));
-        assert_eq!(window(date("2027-01-05")), ("2026-12-22".to_string(), "2027-03-05".to_string()));
+        assert_eq!(window(date("2026-12-20")), ("2026-11-30".to_string(), "2027-02-21".to_string()));
+        assert_eq!(window(date("2027-01-05")), ("2026-12-21".to_string(), "2027-03-07".to_string()));
     }
 
     #[test]
     fn window_end_is_clamped_to_the_last_day_of_a_shorter_month() {
         assert_eq!(window(date("2026-12-31")).1, "2027-02-28");
-        assert_eq!(window(date("2027-12-31")).1, "2028-02-29");
+        assert_eq!(window(date("2027-12-31")).1, "2028-03-05", "29.2.2028 ist ein Dienstag, die Woche endet am 5.3.");
     }
 
     #[test]
@@ -243,7 +294,7 @@ mod tests {
         let (_dir, store) = open_temp();
         let api = FakeApi::answering(&format!("[{CHRISTMAS},{NEW_YEAR}]"));
         refresh(&store, &api, date("2026-12-20")).unwrap();
-        assert_eq!(*api.requests.borrow(), vec![("2026-12-06".to_string(), "2027-02-20".to_string())]);
+        assert_eq!(*api.requests.borrow(), vec![("2026-11-30".to_string(), "2027-02-21".to_string())]);
         assert_eq!(
             store.lock().unwrap().holidays_between("2026-12-06", "2027-02-20").unwrap(),
             vec![holiday("2026-12-25", "1. Weihnachtsfeiertag"), holiday("2027-01-01", "Neujahr")]
@@ -261,6 +312,18 @@ mod tests {
     }
 
     #[test]
+    fn refresh_covers_the_edge_weeks_completely_but_not_the_weeks_beyond() {
+        let (_dir, store) = open_temp();
+        refresh(&store, &FakeApi::answering("[]"), date("2026-11-20")).unwrap();
+        let store = store.lock().unwrap();
+        // Woche, in die „heute −14 Tage“ (6.11.) fällt, und Woche, in die „heute +2 Monate“ (20.1.) fällt
+        assert!(!store.week_holidays("2026-11-02", "2026-11-08").unwrap().missing);
+        assert!(!store.week_holidays("2027-01-18", "2027-01-24").unwrap().missing);
+        assert!(store.week_holidays("2026-10-26", "2026-11-01").unwrap().missing);
+        assert!(store.week_holidays("2027-01-25", "2027-01-31").unwrap().missing);
+    }
+
+    #[test]
     fn refresh_replaces_stale_holidays_of_the_window() {
         let (_dir, store) = open_temp();
         refresh(&store, &FakeApi::answering(&format!("[{CHRISTMAS}]")), date("2026-12-20")).unwrap();
@@ -275,7 +338,7 @@ mod tests {
     fn refresh_without_network_keeps_the_stored_holidays_and_reports_a_german_warning() {
         let (_dir, store) = open_temp();
         refresh(&store, &FakeApi::answering(&format!("[{CHRISTMAS}]")), date("2026-12-20")).unwrap();
-        let error = refresh(&store, &FakeApi::offline(), date("2026-12-21")).unwrap_err();
+        let error = refresh(&store, &FakeApi::offline(), date("2027-01-05")).unwrap_err();
         assert_eq!(error.to_string(), "Feiertage konnten nicht aktualisiert werden.");
         let store = store.lock().unwrap();
         assert_eq!(
@@ -283,7 +346,102 @@ mod tests {
             vec![holiday("2026-12-25", "1. Weihnachtsfeiertag")]
         );
         assert!(store.is_loaded("2026-12-06", "2027-02-20").unwrap());
-        assert!(!store.is_loaded("2026-12-07", "2027-02-21").unwrap(), "Fenster des Fehlversuchs gilt nicht als geladen");
+        assert!(!store.is_loaded("2027-03-01", "2027-03-07").unwrap(), "Fenster des Fehlversuchs gilt nicht als geladen");
+    }
+
+    #[test]
+    fn week_of_returns_monday_to_sunday_for_any_day_of_the_week() {
+        for day in ["2026-11-16", "2026-11-18", "2026-11-22"] {
+            assert_eq!(week_of(day).unwrap(), ("2026-11-16".to_string(), "2026-11-22".to_string()), "{day}");
+        }
+    }
+
+    #[test]
+    fn week_of_spans_the_year_boundary() {
+        assert_eq!(week_of("2027-01-01").unwrap(), ("2026-12-28".to_string(), "2027-01-03".to_string()));
+    }
+
+    #[test]
+    fn week_of_rejects_a_malformed_date() {
+        for day in ["", "morgen", "2026-02-31", "16.11.2026", "2026-1-5"] {
+            assert!(matches!(week_of(day), Err(HolidayError::Store(StoreError::InvalidDate))), "{day}");
+        }
+    }
+
+    #[test]
+    fn load_week_asks_for_exactly_that_week_and_stores_its_holidays() {
+        let (_dir, store) = open_temp();
+        let api = FakeApi::answering(&format!("[{CHRISTMAS}]"));
+        load_week(&store, &api, "2026-12-23").unwrap();
+        assert_eq!(*api.requests.borrow(), vec![("2026-12-21".to_string(), "2026-12-27".to_string())]);
+        let week = store.lock().unwrap().week_holidays("2026-12-21", "2026-12-27").unwrap();
+        assert_eq!(week, WeekHolidays { holidays: vec![holiday("2026-12-25", "1. Weihnachtsfeiertag")], missing: false });
+    }
+
+    #[test]
+    fn load_week_without_holidays_marks_the_week_as_loaded() {
+        let (_dir, store) = open_temp();
+        load_week(&store, &FakeApi::answering("[]"), "2027-03-02").unwrap();
+        let week = store.lock().unwrap().week_holidays("2027-03-01", "2027-03-07").unwrap();
+        assert_eq!(week, WeekHolidays { holidays: vec![], missing: false });
+    }
+
+    #[test]
+    fn load_week_on_an_already_loaded_week_does_not_call_the_api_and_keeps_its_holidays() {
+        let (_dir, store) = open_temp();
+        refresh(&store, &FakeApi::answering(&format!("[{CHRISTMAS}]")), date("2026-12-20")).unwrap();
+        let api = FakeApi::answering(&format!("[{NEW_YEAR}]"));
+        load_week(&store, &api, "2026-12-23").unwrap();
+        assert!(api.requests.borrow().is_empty());
+        assert_eq!(
+            store.lock().unwrap().holidays_between("2026-12-21", "2026-12-27").unwrap(),
+            vec![holiday("2026-12-25", "1. Weihnachtsfeiertag")]
+        );
+    }
+
+    #[test]
+    fn load_week_fetches_a_week_that_is_only_partly_loaded() {
+        let (_dir, store) = open_temp();
+        store.lock().unwrap().save_holidays("2027-02-22", "2027-03-03", &[]).unwrap();
+        let api = FakeApi::answering("[]");
+        load_week(&store, &api, "2027-03-02").unwrap();
+        assert_eq!(*api.requests.borrow(), vec![("2027-03-01".to_string(), "2027-03-07".to_string())]);
+        assert!(!store.lock().unwrap().week_holidays("2027-03-01", "2027-03-07").unwrap().missing);
+    }
+
+    #[test]
+    fn load_week_leaves_other_weeks_untouched() {
+        let (_dir, store) = open_temp();
+        refresh(&store, &FakeApi::answering(&format!("[{CHRISTMAS}]")), date("2026-12-20")).unwrap();
+        load_week(&store, &FakeApi::answering("[]"), "2027-03-02").unwrap();
+        let store = store.lock().unwrap();
+        assert_eq!(store.holidays_between("2026-12-06", "2027-02-20").unwrap(), vec![holiday("2026-12-25", "1. Weihnachtsfeiertag")]);
+        assert!(!store.week_holidays("2027-03-01", "2027-03-07").unwrap().missing);
+        assert!(store.week_holidays("2027-02-22", "2027-02-28").unwrap().missing, "Lücke zwischen Fenster und Woche");
+    }
+
+    #[test]
+    fn load_week_without_network_stores_nothing_and_reports_a_german_message() {
+        let (_dir, store) = open_temp();
+        let error = load_week(&store, &FakeApi::offline(), "2027-03-02").unwrap_err();
+        assert_eq!(error.to_string(), "Feiertage für diese Woche konnten nicht geladen werden.");
+        assert!(store.lock().unwrap().week_holidays("2027-03-01", "2027-03-07").unwrap().missing);
+    }
+
+    #[test]
+    fn load_week_with_an_unreadable_answer_stores_nothing() {
+        let (_dir, store) = open_temp();
+        let error = load_week(&store, &FakeApi::answering("<html>Bad Gateway</html>"), "2027-03-02").unwrap_err();
+        assert_eq!(error.to_string(), "Feiertage für diese Woche konnten nicht geladen werden.");
+        assert!(store.lock().unwrap().week_holidays("2027-03-01", "2027-03-07").unwrap().missing);
+    }
+
+    #[test]
+    fn load_week_with_a_malformed_date_does_not_call_the_api() {
+        let (_dir, store) = open_temp();
+        let api = FakeApi::answering("[]");
+        assert!(matches!(load_week(&store, &api, "morgen"), Err(HolidayError::Store(StoreError::InvalidDate))));
+        assert!(api.requests.borrow().is_empty());
     }
 
     /// Echter Abruf bei OpenHolidays, daher nur mit `cargo test -- --ignored`.
@@ -299,6 +457,21 @@ mod tests {
                 holiday("2026-12-26", "2. Weihnachtsfeiertag"),
                 holiday("2027-01-01", "Neujahr"),
             ]
+        );
+    }
+
+    #[test]
+    #[ignore = "braucht Netz"]
+    fn live_load_week_stores_the_holidays_of_a_week_outside_the_window() {
+        let (_dir, store) = open_temp();
+        load_week(&store, &OpenHolidays, "2026-12-23").unwrap();
+        let week = store.lock().unwrap().week_holidays("2026-12-21", "2026-12-27").unwrap();
+        assert_eq!(
+            week,
+            WeekHolidays {
+                holidays: vec![holiday("2026-12-25", "1. Weihnachtsfeiertag"), holiday("2026-12-26", "2. Weihnachtsfeiertag")],
+                missing: false
+            }
         );
     }
 

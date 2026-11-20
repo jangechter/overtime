@@ -11,18 +11,40 @@ const loaded = ref(false);
 const loadError = ref("");
 const saveError = ref("");
 const holidayWarning = ref("");
+/** Für die angezeigte Woche wurden nie Feiertage geladen (Backend: Zeitraum nicht in der Tabelle der geladenen). */
+const holidaysMissing = ref(false);
+const weekFetchError = ref("");
+/** Wochen (Montag), deren Feiertage gerade per Knopf nachgeladen werden. */
+const fetching = ref(new Set<string>());
 let latestRequest = 0;
 
 const formatDate = (date: string) => new Date(`${date}T00:00:00`).toLocaleDateString("de-DE");
 const weekLabel = computed(() => `${formatDate(days.value[0])} – ${formatDate(days.value[6])}`);
 
-/** Gespeicherte Feiertage der angezeigten Woche, nach Datum. */
-async function fetchHolidays(): Promise<Record<string, string>> {
-  const rows = await invoke<Array<{ date: string; name: string }>>("load_holidays", {
-    from: days.value[0],
-    to: days.value[6],
-  });
-  return Object.fromEntries(rows.map((row) => [row.date, row.name]));
+interface WeekHolidays {
+  holidays: Array<{ date: string; name: string }>;
+  missing: boolean;
+}
+
+/** Gespeicherte Feiertage der angezeigten Woche und ob für sie nie geladen wurde. */
+function fetchHolidays(): Promise<WeekHolidays> {
+  return invoke<WeekHolidays>("load_holidays", { from: days.value[0], to: days.value[6] });
+}
+
+function showHolidays(week: WeekHolidays) {
+  holidays.value = Object.fromEntries(week.holidays.map((holiday) => [holiday.date, holiday.name]));
+  holidaysMissing.value = week.missing;
+}
+
+/** Liest die Feiertage der angezeigten Woche neu, ohne die Zeilen anzufassen. */
+async function reloadHolidays() {
+  const weekStart = days.value[0];
+  try {
+    const week = await fetchHolidays();
+    if (days.value[0] === weekStart) showHolidays(week);
+  } catch (e) {
+    loadError.value = String(e);
+  }
 }
 
 async function loadWeek() {
@@ -30,8 +52,10 @@ async function loadWeek() {
   loaded.value = false;
   loadError.value = "";
   saveError.value = "";
+  weekFetchError.value = "";
+  holidaysMissing.value = false;
   try {
-    const [rows, weekHolidays] = await Promise.all([
+    const [rows, week] = await Promise.all([
       invoke<Array<StoredEntry & { date: string }>>("load_entries", {
         from: days.value[0],
         to: days.value[6],
@@ -40,7 +64,7 @@ async function loadWeek() {
     ]);
     if (request !== latestRequest) return;
     entries.value = Object.fromEntries(rows.map((row) => [row.date, row]));
-    holidays.value = weekHolidays;
+    showHolidays(week);
   } catch (e) {
     if (request !== latestRequest) return;
     loadError.value = String(e);
@@ -57,13 +81,24 @@ async function refreshHolidays() {
     holidayWarning.value = String(e);
     return;
   }
+  await reloadHolidays();
+}
+
+/** Knopf „Feiertage laden“: holt genau die angezeigte Woche. Ohne Netz bleibt die Warnung, es erscheint eine Meldung. */
+async function loadMissingHolidays() {
   const weekStart = days.value[0];
+  if (fetching.value.has(weekStart)) return;
+  fetching.value.add(weekStart);
+  weekFetchError.value = "";
   try {
-    const weekHolidays = await fetchHolidays();
-    if (days.value[0] === weekStart) holidays.value = weekHolidays;
+    await invoke("fetch_week_holidays", { date: weekStart });
   } catch (e) {
-    loadError.value = String(e);
+    if (days.value[0] === weekStart) weekFetchError.value = String(e);
+    return;
+  } finally {
+    fetching.value.delete(weekStart);
   }
+  await reloadHolidays();
 }
 
 function reportSaveFailure(date: string, message: string) {
@@ -100,6 +135,13 @@ onMounted(() => {
     <p v-if="loadError" class="error" data-test="load-error">{{ loadError }}</p>
     <p v-if="saveError" class="error" data-test="save-error">{{ saveError }}</p>
     <p v-if="holidayWarning" class="warning" data-test="holiday-warning">{{ holidayWarning }}</p>
+    <p v-if="holidaysMissing" class="warning" data-test="holidays-missing">
+      Feiertage für diese Woche fehlen.
+      <button type="button" data-test="load-holidays" :disabled="fetching.has(days[0])" @click="loadMissingHolidays">
+        Feiertage laden
+      </button>
+    </p>
+    <p v-if="weekFetchError" class="error" data-test="holidays-load-error">{{ weekFetchError }}</p>
     <template v-if="loaded">
       <WeekRow
         v-for="day in days"

@@ -23,7 +23,7 @@
 
 ## Decided (nach Erstellung des Plans, 2026-11-20)
 - Feiertags-API: OpenHolidays (`https://openholidaysapi.org/PublicHolidays?countryIsoCode=DE&subdivisionCode=DE-NW&languageIsoCode=DE&validFrom=…&validTo=…`). Gründe: ein Aufruf deckt den Zeitraum ab (auch über den Jahreswechsel), kein Schlüssel, laut FAQ kostenlos und kommerziell erlaubt, Lizenz ODbL (Quelle nennen), dokumentierte Datenquellen. Verworfen: Nager.Date (Nutzung kommerziell nur mit Sponsoring, Nutzungsbedingungen jederzeit änderbar, Doku wechselt auf v4/neue Domain) und feiertage-api.de (nur pro Jahr abfragbar, keine Lizenz genannt, Privatdienst auf Wikipedia-Basis). Alle drei lieferten für NRW 2026 dieselben 11 Feiertage.
-- Lücken über 2 Wochen: Die App lädt beim Start nur das feste Fenster (−2 Wochen bis +2 Monate). Für eine angezeigte Woche ohne geladene Feiertage erscheint eine Warnung „Feiertage für diese Woche fehlen“ mit dem Knopf „Feiertage laden“, der genau diese Woche von der API holt und speichert. Ohne Netz bleibt die Warnung, es erscheint eine Meldung, die App rechnet weiter. Das Soll wird für solche Wochen nicht automatisch gesenkt, solange die Feiertage fehlen (betrifft S5).
+- Lücken über 2 Wochen: Die App lädt beim Start nur das feste Fenster (−2 Wochen bis +2 Monate, nach außen auf volle Wochen Montag bis Sonntag erweitert – Änderung aus dem S4b-Review, sonst zeigten die Randwochen bei jedem Start fälschlich die Warnung). Für eine angezeigte Woche ohne geladene Feiertage erscheint eine Warnung „Feiertage für diese Woche fehlen“ mit dem Knopf „Feiertage laden“, der genau diese Woche von der API holt und speichert. Ohne Netz bleibt die Warnung, es erscheint eine Meldung, die App rechnet weiter. Das Soll wird für solche Wochen nicht automatisch gesenkt, solange die Feiertage fehlen (betrifft S5).
 - Die App merkt sich, welche Zeiträume geladen wurden (eigene Tabelle in SQLite); sonst ist „keine Feiertage in dieser Woche“ nicht von „nie geladen“ zu unterscheiden.
 
 ## Open
@@ -100,9 +100,10 @@
 - Touches: src-tauri/src/store.rs, API-Modul aus S4a, src-tauri/src/lib.rs (Command zum Nachladen), src/WeekView.vue
 - Depends on: S4a
 - Open: Reihenfolge nach der Speicherung
-- Status: todo
+- Status: done
 - Added: split from S4 – Warnung und Nachladen sind eine eigene, einzeln demonstrierbare Funktion auf S4a.
 - Notes: Der Knopf „Feiertage laden“ geht über den ursprünglichen Plan hinaus (Wunsch des Nutzers). Das Soll wird für Wochen mit fehlenden Feiertagen nicht automatisch gesenkt (betrifft S5).
+  Tests grün (Rust 62/62 plus 2 ignorierte Live-Tests, Vue 54/54, `npm run build` und `cargo build` ohne Fehler); echtes Nachladen einer Woche außerhalb des Fensters mit `cargo test live_ -- --ignored` gegen OpenHolidays geprüft. Demo vom Nutzer im Fenster bestätigt. `load_holidays` liefert jetzt `{ holidays, missing }` (`Store::week_holidays`), `missing` heißt: kein gespeicherter Zeitraum deckt die Woche ab. Neuer Befehl `fetch_week_holidays(date)`: das Backend bestimmt Montag bis Sonntag selbst und prüft das Datum, bevor es die API anfragt; eine schon vollständig geladene Woche wird nicht erneut abgerufen oder überschrieben. Meldung bei Ausfall: „Feiertage für diese Woche konnten nicht geladen werden.“ In den Vue-Tests liefern die Fakes für `load_holidays` die neue Form. Aus dem Review: Das Startfenster (S4a) wird jetzt auf volle Wochen erweitert (`holidays::window`), damit die Wochen an den Rändern nicht fälschlich warnen. Beim allerersten Start (leere Datenbank) blitzt die Warnung kurz auf, bis der Abruf fertig ist.
 
 ## S5: Wochensumme, Soll und Über-/Minusstunden
 - Goal: Pro Woche werden Ist-Summe, Soll (40 h, Feiertage senken es um 8 h pro Feiertag Montag bis Freitag) und der Saldo als Über- oder Minusstunden angezeigt, berechnet im Rust-Backend.

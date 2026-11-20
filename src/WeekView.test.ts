@@ -8,10 +8,14 @@ const lastCall = (command: string) => {
   const matching = calls.filter((call) => call[0] === command);
   return matching[matching.length - 1];
 };
-let backend: (...args: unknown[]) => Promise<unknown> = async () => [];
-/** Antwortet nur auf `load_entries` mit `handler`; alle anderen Befehle (Feiertage) liefern eine leere Liste. */
+/** Antwort von `load_holidays`: gespeicherte Feiertage der Woche und ob für sie nie geladen wurde. */
+const holidayAnswer = (holidays: Array<{ date: string; name: string }> = [], missing = false) => ({ holidays, missing });
+/** Standardantwort des Backends: keine Feiertage, nichts fehlt, sonst eine leere Liste. */
+const answer = (command: unknown) => Promise.resolve(command === "load_holidays" ? holidayAnswer() : []);
+let backend: (...args: unknown[]) => Promise<unknown> = async (command) => answer(command);
+/** Antwortet nur auf `load_entries` mit `handler`; alle anderen Befehle (Feiertage) bekommen die Standardantwort. */
 const onlyEntries = (handler: (from: string) => Promise<unknown>) => (command: unknown, args: unknown) =>
-  command === "load_entries" ? handler((args as { from: string }).from) : Promise.resolve([]);
+  command === "load_entries" ? handler((args as { from: string }).from) : answer(command);
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: (...args: unknown[]) => {
     calls.push(args);
@@ -22,12 +26,12 @@ vi.mock("@tauri-apps/api/core", () => ({
 describe("WeekView", () => {
   beforeEach(() => {
     calls.length = 0;
-    backend = async () => [];
+    backend = async (command) => answer(command);
   });
 
   it("lädt die Einträge der aktuellen Woche und trägt sie in die Zeilen ein", async () => {
     const week = currentWeek();
-    backend = async () => [{ date: week[2], start: "08:00", end: "16:30", breakMinutes: 30, minutes: 480 }];
+    backend = onlyEntries(async () => [{ date: week[2], start: "08:00", end: "16:30", breakMinutes: 30, minutes: 480 }]);
     const wrapper = mount(WeekView);
     await flushPromises();
     expect(calls[0]).toEqual(["load_entries", { from: week[0], to: week[6] }]);
@@ -149,7 +153,7 @@ describe("WeekView", () => {
         ? new Promise((resolve) => {
             finishSave = resolve as (minutes: number) => void;
           })
-        : Promise.resolve([]);
+        : answer(command);
     const wrapper = mount(WeekView);
     await flushPromises();
     const row = wrapper.findAll(".week-row")[1];
@@ -172,7 +176,7 @@ describe("WeekView", () => {
         ? new Promise((_resolve, reject) => {
             failSave = reject;
           })
-        : Promise.resolve([]);
+        : answer(command);
     const wrapper = mount(WeekView);
     await flushPromises();
     const row = wrapper.findAll(".week-row")[1];
@@ -193,7 +197,7 @@ describe("WeekView", () => {
         ? new Promise((_resolve, reject) => {
             failSave = reject;
           })
-        : Promise.resolve([]);
+        : answer(command);
     const wrapper = mount(WeekView);
     await flushPromises();
     const row = wrapper.findAll(".week-row")[1];
@@ -220,7 +224,9 @@ describe("WeekView", () => {
     it("markiert den Feiertag in der passenden Zeile", async () => {
       const week = currentWeek();
       backend = (command) =>
-        Promise.resolve(command === "load_holidays" ? [{ date: week[3], name: "Testfeiertag" }] : []);
+        command === "load_holidays"
+          ? Promise.resolve(holidayAnswer([{ date: week[3], name: "Testfeiertag" }]))
+          : answer(command);
       const wrapper = mount(WeekView);
       await flushPromises();
       const rows = wrapper.findAll(".week-row");
@@ -241,7 +247,7 @@ describe("WeekView", () => {
             };
           });
         }
-        return Promise.resolve(command === "load_holidays" ? stored : []);
+        return command === "load_holidays" ? Promise.resolve(holidayAnswer(stored)) : answer(command);
       };
       const wrapper = mount(WeekView);
       await flushPromises();
@@ -263,7 +269,7 @@ describe("WeekView", () => {
           ? new Promise((resolve) => {
               finishRefresh = () => resolve(undefined);
             })
-          : Promise.resolve([]);
+          : answer(command);
       const wrapper = mount(WeekView);
       await flushPromises();
       await wrapper.get('[data-test="prev"]').trigger("click");
@@ -277,7 +283,7 @@ describe("WeekView", () => {
       const week = currentWeek();
       const previous = shiftWeek(week, -1);
       let finishRefresh: () => void = () => {};
-      let answerStale: (rows: unknown[]) => void = () => {};
+      let answerStale: (answer: unknown) => void = () => {};
       let refreshDone = false;
       backend = (command, args) => {
         if (command === "refresh_holidays") {
@@ -290,10 +296,10 @@ describe("WeekView", () => {
         }
         if (command === "load_holidays" && refreshDone && (args as { from: string }).from === week[0]) {
           return new Promise((resolve) => {
-            answerStale = resolve as (rows: unknown[]) => void;
+            answerStale = resolve;
           });
         }
-        return Promise.resolve([]);
+        return answer(command);
       };
       const wrapper = mount(WeekView);
       await flushPromises();
@@ -302,7 +308,7 @@ describe("WeekView", () => {
       await wrapper.get('[data-test="prev"]').trigger("click");
       await flushPromises();
       // Das Datum liegt absichtlich in der neuen Woche: Würde die späte Antwort übernommen, wäre sie sichtbar.
-      answerStale([{ date: previous[3], name: "Späte Antwort der alten Woche" }]);
+      answerStale(holidayAnswer([{ date: previous[3], name: "Späte Antwort der alten Woche" }]));
       await flushPromises();
       expect(wrapper.findAll(".week-row")).toHaveLength(7);
       expect(wrapper.find('[data-test="holiday"]').exists()).toBe(false);
@@ -312,7 +318,7 @@ describe("WeekView", () => {
       let holidayReads = 0;
       backend = (command) => {
         if (command === "load_holidays" && ++holidayReads > 1) return Promise.reject("Datenbank nicht lesbar.");
-        return Promise.resolve([]);
+        return answer(command);
       };
       const wrapper = mount(WeekView);
       await flushPromises();
@@ -325,11 +331,9 @@ describe("WeekView", () => {
       const week = currentWeek();
       const previous = shiftWeek(week, -1);
       backend = (command, args) =>
-        Promise.resolve(
-          command === "load_holidays" && (args as { from: string }).from === previous[0]
-            ? [{ date: previous[0], name: "Vorwochenfeiertag" }]
-            : [],
-        );
+        command === "load_holidays" && (args as { from: string }).from === previous[0]
+          ? Promise.resolve(holidayAnswer([{ date: previous[0], name: "Vorwochenfeiertag" }]))
+          : answer(command);
       const wrapper = mount(WeekView);
       await flushPromises();
       await wrapper.get('[data-test="prev"]').trigger("click");
@@ -348,9 +352,9 @@ describe("WeekView", () => {
       const week = currentWeek();
       backend = (command) => {
         if (command === "refresh_holidays") return Promise.reject("Feiertage konnten nicht aktualisiert werden.");
-        if (command === "load_holidays") return Promise.resolve([{ date: week[3], name: "Gespeicherter Feiertag" }]);
+        if (command === "load_holidays") return Promise.resolve(holidayAnswer([{ date: week[3], name: "Gespeicherter Feiertag" }]));
         if (command === "save_entry") return Promise.resolve(480);
-        return Promise.resolve([]);
+        return answer(command);
       };
       const wrapper = mount(WeekView);
       await flushPromises();
@@ -370,12 +374,163 @@ describe("WeekView", () => {
       backend = (command) =>
         command === "refresh_holidays"
           ? Promise.reject("Feiertage konnten nicht aktualisiert werden.")
-          : Promise.resolve([]);
+          : answer(command);
       const wrapper = mount(WeekView);
       await flushPromises();
       await wrapper.get('[data-test="prev"]').trigger("click");
       await flushPromises();
       expect(wrapper.find('[data-test="holiday-warning"]').exists()).toBe(true);
+    });
+
+    describe("fehlende Feiertage", () => {
+      it("zeigt keine Warnung für eine Woche, für die Feiertage geladen wurden", async () => {
+        const wrapper = mount(WeekView);
+        await flushPromises();
+        expect(wrapper.find('[data-test="holidays-missing"]').exists()).toBe(false);
+        expect(wrapper.find('[data-test="load-holidays"]').exists()).toBe(false);
+      });
+
+      it("warnt mit dem Knopf „Feiertage laden“, wenn für die Woche keine geladen wurden", async () => {
+        backend = (command) =>
+          command === "load_holidays" ? Promise.resolve(holidayAnswer([], true)) : answer(command);
+        const wrapper = mount(WeekView);
+        await flushPromises();
+        expect(wrapper.get('[data-test="holidays-missing"]').text()).toContain("Feiertage für diese Woche fehlen");
+        expect(wrapper.get('[data-test="load-holidays"]').text()).toBe("Feiertage laden");
+        expect(wrapper.findAll(".week-row")).toHaveLength(7);
+      });
+
+      it("zeigt die Warnung nur in den Wochen, für die tatsächlich nichts geladen wurde", async () => {
+        const week = currentWeek();
+        const previous = shiftWeek(week, -1);
+        backend = (command, args) =>
+          command === "load_holidays"
+            ? Promise.resolve(holidayAnswer([], (args as { from: string }).from === previous[0]))
+            : answer(command);
+        const wrapper = mount(WeekView);
+        await flushPromises();
+        expect(wrapper.find('[data-test="holidays-missing"]').exists()).toBe(false);
+        await wrapper.get('[data-test="prev"]').trigger("click");
+        await flushPromises();
+        expect(wrapper.find('[data-test="holidays-missing"]').exists()).toBe(true);
+        await wrapper.get('[data-test="next"]').trigger("click");
+        await flushPromises();
+        expect(wrapper.find('[data-test="holidays-missing"]').exists()).toBe(false);
+      });
+
+      it("lädt per Knopf genau die angezeigte Woche, markiert den Feiertag und blendet die Warnung aus", async () => {
+        const week = currentWeek();
+        let fetched = false;
+        backend = (command) => {
+          if (command === "fetch_week_holidays") {
+            fetched = true;
+            return Promise.resolve(undefined);
+          }
+          if (command === "load_holidays") {
+            return Promise.resolve(
+              fetched ? holidayAnswer([{ date: week[3], name: "Nachgeladener Feiertag" }]) : holidayAnswer([], true),
+            );
+          }
+          return answer(command);
+        };
+        const wrapper = mount(WeekView);
+        await flushPromises();
+        await wrapper.findAll(".week-row")[1].get('[data-test="start"]').setValue("08:00");
+
+        await wrapper.get('[data-test="load-holidays"]').trigger("click");
+        await flushPromises();
+        expect(calls).toContainEqual(["fetch_week_holidays", { date: week[0] }]);
+        expect(wrapper.findAll(".week-row")[3].get('[data-test="holiday"]').text()).toBe("Nachgeladener Feiertag");
+        expect(wrapper.find('[data-test="holidays-missing"]').exists()).toBe(false);
+        expect(wrapper.find('[data-test="holidays-load-error"]').exists()).toBe(false);
+        expect((wrapper.findAll(".week-row")[1].get('[data-test="start"]').element as HTMLInputElement).value).toBe("08:00");
+      });
+
+      it("zeigt bei einem Ausfall eine Meldung, lässt die Warnung stehen und rechnet weiter", async () => {
+        backend = (command) => {
+          if (command === "fetch_week_holidays") return Promise.reject("Feiertage für diese Woche konnten nicht geladen werden.");
+          if (command === "load_holidays") return Promise.resolve(holidayAnswer([], true));
+          if (command === "save_entry") return Promise.resolve(480);
+          return answer(command);
+        };
+        const wrapper = mount(WeekView);
+        await flushPromises();
+        await wrapper.get('[data-test="load-holidays"]').trigger("click");
+        await flushPromises();
+        expect(wrapper.get('[data-test="holidays-load-error"]').text()).toBe(
+          "Feiertage für diese Woche konnten nicht geladen werden.",
+        );
+        expect(wrapper.find('[data-test="holidays-missing"]').exists()).toBe(true);
+        expect(wrapper.find('[data-test="load-holidays"]').attributes("disabled")).toBeUndefined();
+        expect(wrapper.findAll(".week-row")).toHaveLength(7);
+
+        const row = wrapper.findAll(".week-row")[1];
+        await row.get('[data-test="start"]').setValue("08:00");
+        await row.get('[data-test="end"]').setValue("16:30");
+        await flushPromises();
+        expect(row.get('[data-test="hours"]').text()).toBe("8:00 h");
+      });
+
+      it("sperrt den Knopf, solange das Nachladen läuft, und ruft nur einmal ab", async () => {
+        let finishFetch: () => void = () => {};
+        backend = (command) => {
+          if (command === "fetch_week_holidays") {
+            return new Promise((resolve) => {
+              finishFetch = () => resolve(undefined);
+            });
+          }
+          if (command === "load_holidays") return Promise.resolve(holidayAnswer([], true));
+          return answer(command);
+        };
+        const wrapper = mount(WeekView);
+        await flushPromises();
+        await wrapper.get('[data-test="load-holidays"]').trigger("click");
+        expect(wrapper.get('[data-test="load-holidays"]').attributes("disabled")).toBeDefined();
+        await wrapper.get('[data-test="load-holidays"]').trigger("click");
+        expect(calls.filter((call) => call[0] === "fetch_week_holidays")).toHaveLength(1);
+        finishFetch();
+        await flushPromises();
+        expect(wrapper.get('[data-test="load-holidays"]').attributes("disabled")).toBeUndefined();
+      });
+
+      it("zeigt die Meldung eines Ausfalls nicht in einer anderen Woche an", async () => {
+        let failFetch: (reason: string) => void = () => {};
+        backend = (command) => {
+          if (command === "fetch_week_holidays") {
+            return new Promise((_resolve, reject) => {
+              failFetch = reject;
+            });
+          }
+          if (command === "load_holidays") return Promise.resolve(holidayAnswer([], true));
+          return answer(command);
+        };
+        const wrapper = mount(WeekView);
+        await flushPromises();
+        await wrapper.get('[data-test="load-holidays"]').trigger("click");
+        await wrapper.get('[data-test="prev"]').trigger("click");
+        await flushPromises();
+        failFetch("Feiertage für diese Woche konnten nicht geladen werden.");
+        await flushPromises();
+        expect(wrapper.find('[data-test="holidays-load-error"]').exists()).toBe(false);
+        expect(wrapper.find('[data-test="holidays-missing"]').exists()).toBe(true);
+        expect(wrapper.get('[data-test="load-holidays"]').attributes("disabled")).toBeUndefined();
+      });
+
+      it("blendet die Meldung eines Ausfalls beim Blättern aus", async () => {
+        backend = (command) => {
+          if (command === "fetch_week_holidays") return Promise.reject("Feiertage für diese Woche konnten nicht geladen werden.");
+          if (command === "load_holidays") return Promise.resolve(holidayAnswer([], true));
+          return answer(command);
+        };
+        const wrapper = mount(WeekView);
+        await flushPromises();
+        await wrapper.get('[data-test="load-holidays"]').trigger("click");
+        await flushPromises();
+        expect(wrapper.find('[data-test="holidays-load-error"]').exists()).toBe(true);
+        await wrapper.get('[data-test="next"]').trigger("click");
+        await flushPromises();
+        expect(wrapper.find('[data-test="holidays-load-error"]').exists()).toBe(false);
+      });
     });
 
     it("nennt die Quelle der Feiertage", async () => {

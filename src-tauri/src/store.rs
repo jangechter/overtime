@@ -30,6 +30,13 @@ pub struct Holiday {
     pub name: String,
 }
 
+/// Feiertage einer Woche und ob für sie überhaupt geladen wurde (`missing`: nie geladen).
+#[derive(Debug, PartialEq, Eq, Serialize)]
+pub struct WeekHolidays {
+    pub holidays: Vec<Holiday>,
+    pub missing: bool,
+}
+
 pub struct Store {
     conn: Connection,
 }
@@ -133,6 +140,11 @@ impl Store {
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
+    /// Feiertage von `from` bis `to` samt Angabe, ob der Zeitraum nie geladen wurde.
+    pub fn week_holidays(&self, from: &str, to: &str) -> Result<WeekHolidays, StoreError> {
+        Ok(WeekHolidays { holidays: self.holidays_between(from, to)?, missing: !self.is_loaded(from, to)? })
+    }
+
     /// Ob ein einzelner geladener Zeitraum `from` bis `to` vollständig abdeckt.
     pub fn is_loaded(&self, from: &str, to: &str) -> Result<bool, StoreError> {
         check_date(from)?;
@@ -146,7 +158,7 @@ impl Store {
 }
 
 /// Existierendes Kalenderdatum im Format `YYYY-MM-DD`.
-fn check_date(date: &str) -> Result<(), StoreError> {
+pub(crate) fn check_date(date: &str) -> Result<(), StoreError> {
     let bytes = date.as_bytes();
     let shape_ok = bytes.len() == 10
         && bytes[4] == b'-'
@@ -377,6 +389,49 @@ mod tests {
         assert!(!store.is_loaded("2027-03-01", "2027-03-07").unwrap());
         assert!(!store.is_loaded("2026-11-02", "2026-11-08").unwrap(), "Woche ragt vor das Fenster");
         assert!(!store.is_loaded("2027-01-18", "2027-01-24").unwrap(), "Woche ragt hinter das Fenster");
+    }
+
+    #[test]
+    fn week_that_was_never_loaded_is_reported_as_missing() {
+        let (_dir, store) = open_temp();
+        assert_eq!(
+            store.week_holidays("2027-03-01", "2027-03-07").unwrap(),
+            WeekHolidays { holidays: vec![], missing: true }
+        );
+    }
+
+    #[test]
+    fn loaded_week_without_holidays_is_not_reported_as_missing() {
+        let (_dir, mut store) = open_temp();
+        store.save_holidays("2026-11-06", "2027-01-20", &[holiday("2026-12-25", "1. Weihnachtsfeiertag")]).unwrap();
+        assert_eq!(
+            store.week_holidays("2026-11-09", "2026-11-15").unwrap(),
+            WeekHolidays { holidays: vec![], missing: false }
+        );
+    }
+
+    #[test]
+    fn loaded_week_returns_its_holidays() {
+        let (_dir, mut store) = open_temp();
+        store.save_holidays("2026-11-06", "2027-01-20", &[holiday("2026-12-25", "1. Weihnachtsfeiertag")]).unwrap();
+        assert_eq!(
+            store.week_holidays("2026-12-21", "2026-12-27").unwrap(),
+            WeekHolidays { holidays: vec![holiday("2026-12-25", "1. Weihnachtsfeiertag")], missing: false }
+        );
+    }
+
+    #[test]
+    fn week_reaching_beyond_the_loaded_window_is_reported_as_missing_but_keeps_its_holidays() {
+        let (_dir, mut store) = open_temp();
+        store.save_holidays("2026-11-06", "2027-01-20", &[holiday("2027-01-01", "Neujahr")]).unwrap();
+        assert_eq!(
+            store.week_holidays("2027-01-18", "2027-01-24").unwrap(),
+            WeekHolidays { holidays: vec![], missing: true }
+        );
+        assert_eq!(
+            store.week_holidays("2026-12-28", "2027-01-03").unwrap(),
+            WeekHolidays { holidays: vec![holiday("2027-01-01", "Neujahr")], missing: false }
+        );
     }
 
     fn loaded_range_count(store: &Store) -> u32 {
