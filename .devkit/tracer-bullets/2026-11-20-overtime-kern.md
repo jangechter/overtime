@@ -84,4 +84,4 @@
 - Depends on: S1, S2, S4
 - Open: Feiertage bei Lücken über 2 Wochen
 - Status: todo
-- Notes: none
+- Notes: Aus dem S2-Review: `Store::between` berechnet die Tagesminuten bei jedem Laden aus den Rohzeiten neu und speichert sie nicht. Ändern sich später die Regeln in `worked_minutes`, ändern sich damit auch alte Wochen. Vor Beginn entscheiden, ob die Minuten beim Speichern mitgespeichert werden (Schema-Änderung, Migration nötig, es gibt noch keine Schema-Version); passt zu "alte Wochen bleiben unverändert".
