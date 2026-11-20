@@ -50,8 +50,8 @@
 - Touches: none yet (Projekt ist leer)
 - Depends on: S1
 - Open: none
-- Status: todo
-- Notes: none
+- Status: done
+- Notes: Tests grün (Rust 20/20, Vue 19/19), Demo vom Nutzer im Fenster bestätigt. Gespeichert werden nur gültige Einträge; ein ungültig gewordener Eintrag überschreibt den gespeicherten nicht. `save_entry` ersetzt `calculate_day`. `load_entries(from, to)` lädt schon beliebige Zeiträume, S3 braucht dafür nur noch die Navigation und den Jahreswechsel-Test.
 
 ## S3: Zwischen Wochen blättern
 - Goal: Man wechselt in der Wochenübersicht zwischen Wochen und sieht die jeweils gespeicherten Tage.

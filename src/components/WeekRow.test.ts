@@ -33,7 +33,7 @@ describe("WeekRow", () => {
     backend = async () => 480;
     const wrapper = mount(WeekRow, { props: { date: "2026-11-16" } });
     await fill(wrapper, "08:00", "16:30", "30");
-    expect(calls).toContainEqual(["calculate_day", { start: "08:00", end: "16:30", breakMinutes: 30 }]);
+    expect(calls).toContainEqual(["save_entry", { date: "2026-11-16", start: "08:00", end: "16:30", breakMinutes: 30 }]);
     expect(wrapper.get('[data-test="hours"]').text()).toBe("8:00 h");
   });
 
@@ -70,7 +70,7 @@ describe("WeekRow", () => {
     await wrapper.get('[data-test="end"]').setValue("16:30");
     await wrapper.get('[data-test="break"]').setValue("");
     await flushPromises();
-    expect(calls[calls.length - 1]).toEqual(["calculate_day", { start: "08:00", end: "16:30", breakMinutes: 0 }]);
+    expect(calls[calls.length - 1]).toEqual(["save_entry", { date: "2026-11-16", start: "08:00", end: "16:30", breakMinutes: 0 }]);
   });
 
   it("übernimmt nur die Antwort auf die letzte Eingabe", async () => {
@@ -105,5 +105,46 @@ describe("WeekRow", () => {
     const wrapper = mount(WeekRow, { props: { date: "2026-11-16" } });
     await fill(wrapper, "08:00", "25:00", "0");
     expect(wrapper.get('[data-test="error"]').text()).toBe("Bitte Uhrzeiten im Format HH:MM eingeben.");
+  });
+
+  it("zeigt einen gespeicherten Eintrag mit Eingaben und Stunden", () => {
+    const entry = { start: "08:00", end: "16:30", breakMinutes: 30, minutes: 480 };
+    const wrapper = mount(WeekRow, { props: { date: "2026-11-16", entry } });
+    expect((wrapper.get('[data-test="start"]').element as HTMLInputElement).value).toBe("08:00");
+    expect((wrapper.get('[data-test="end"]').element as HTMLInputElement).value).toBe("16:30");
+    expect((wrapper.get('[data-test="break"]').element as HTMLInputElement).value).toBe("30");
+    expect(wrapper.get('[data-test="hours"]').text()).toBe("8:00 h");
+    expect(calls).toEqual([]);
+  });
+
+  it("löscht den gespeicherten Eintrag, wenn das Ende geleert wird", async () => {
+    const entry = { start: "08:00", end: "16:30", breakMinutes: 30, minutes: 480 };
+    const wrapper = mount(WeekRow, { props: { date: "2026-11-16", entry } });
+    await wrapper.get('[data-test="end"]').setValue("");
+    await flushPromises();
+    expect(calls).toEqual([["delete_entry", { date: "2026-11-16" }]]);
+  });
+
+  it("speichert einen ungültigen Eintrag nicht und zeigt die Meldung", async () => {
+    backend = async (command) => {
+      if (command === "save_entry") throw "Das Ende muss nach dem Start liegen.";
+    };
+    const wrapper = mount(WeekRow, { props: { date: "2026-11-16" } });
+    await fill(wrapper, "16:00", "08:00", "0");
+    expect(calls.some(([command]) => command === "delete_entry")).toBe(false);
+    expect(wrapper.get('[data-test="error"]').text()).toBe("Das Ende muss nach dem Start liegen.");
+  });
+
+  it("weist bei einem gespeicherten Tag darauf hin, dass der alte Eintrag erhalten bleibt", async () => {
+    backend = async () => {
+      throw "Das Ende muss nach dem Start liegen.";
+    };
+    const entry = { start: "08:00", end: "16:30", breakMinutes: 30, minutes: 480 };
+    const wrapper = mount(WeekRow, { props: { date: "2026-11-16", entry } });
+    await wrapper.get('[data-test="end"]').setValue("07:00");
+    await flushPromises();
+    expect(wrapper.get('[data-test="error"]').text()).toBe(
+      "Das Ende muss nach dem Start liegen. Der zuletzt gespeicherte Eintrag bleibt erhalten.",
+    );
   });
 });

@@ -2,13 +2,21 @@
 import { computed, ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 
-const props = defineProps<{ date: string }>();
+export interface StoredEntry {
+  start: string;
+  end: string;
+  breakMinutes: number;
+  minutes: number;
+}
 
-const start = ref("");
-const end = ref("");
-const breakMinutes = ref(0);
-const minutes = ref<number | null>(null);
+const props = defineProps<{ date: string; entry?: StoredEntry }>();
+
+const start = ref(props.entry?.start ?? "");
+const end = ref(props.entry?.end ?? "");
+const breakMinutes = ref(props.entry?.breakMinutes ?? 0);
+const minutes = ref<number | null>(props.entry?.minutes ?? null);
 const error = ref("");
+let stored = props.entry !== undefined;
 
 const parsed = computed(() => new Date(`${props.date}T00:00:00`));
 const weekday = computed(() => parsed.value.toLocaleDateString("de-DE", { weekday: "long" }));
@@ -25,24 +33,30 @@ let latestRequest = 0;
 
 watch([start, end, breakMinutes], async () => {
   const request = ++latestRequest;
-  if (!start.value || !end.value) {
-    minutes.value = null;
-    error.value = "";
-    return;
-  }
   try {
-    const result = await invoke<number>("calculate_day", {
+    if (!start.value || !end.value) {
+      minutes.value = null;
+      error.value = "";
+      if (stored) {
+        await invoke("delete_entry", { date: props.date });
+        stored = false;
+      }
+      return;
+    }
+    const result = await invoke<number>("save_entry", {
+      date: props.date,
       start: start.value,
       end: end.value,
       breakMinutes: Number(breakMinutes.value) || 0,
     });
     if (request !== latestRequest) return;
+    stored = true;
     minutes.value = result;
     error.value = "";
   } catch (e) {
     if (request !== latestRequest) return;
     minutes.value = null;
-    error.value = String(e);
+    error.value = stored ? `${String(e)} Der zuletzt gespeicherte Eintrag bleibt erhalten.` : String(e);
   }
 });
 </script>
