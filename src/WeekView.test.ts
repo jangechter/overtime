@@ -441,13 +441,45 @@ describe("WeekView", () => {
       expect(wrapper.findAll(".week-row")[0].get('[data-test="hours"]').text()).toBe("6:00 h");
     });
 
-    it("meldet nach dem Speichern von Einstellungen keine geänderten Feiertage", async () => {
+    it("ruft nach dem Speichern von Einstellungen die Feiertage neu ab und meldet sie", async () => {
       const wrapper = mount(WeekView, { props: { settingsVersion: 0 } });
       await flushPromises();
-      const before = wrapper.emitted("holidaysChanged")?.length ?? 0;
       await wrapper.setProps({ settingsVersion: 1 });
       await flushPromises();
-      expect(wrapper.emitted("holidaysChanged")?.length ?? 0).toBe(before);
+      expect(calls.filter(([command]) => command === "refresh_holidays")).toHaveLength(2);
+      expect(wrapper.emitted("holidaysChanged")).toHaveLength(2);
+    });
+
+    it("liest nach dem Speichern von Einstellungen auch ohne Netz neu und warnt", async () => {
+      let offline = false;
+      let changed = false;
+      backend = (command) => {
+        if (command === "refresh_holidays" && offline) return Promise.reject("Feiertage konnten nicht aktualisiert werden.");
+        if (command === "week_summary") return Promise.resolve(changed ? summaryAnswer(0, 1800) : summaryAnswer(0, 2400));
+        return answer(command);
+      };
+      const wrapper = mount(WeekView, { props: { settingsVersion: 0 } });
+      await flushPromises();
+      offline = true;
+      changed = true;
+      await wrapper.setProps({ settingsVersion: 1 });
+      await flushPromises();
+      expect(wrapper.get('[data-test="holiday-warning"]').text()).toBe("Feiertage konnten nicht aktualisiert werden.");
+      expect(wrapper.get('[data-test="week-target"]').text()).toContain("30:00 h");
+      expect(wrapper.emitted("holidaysChanged")).toHaveLength(1);
+    });
+
+    it("blendet die Warnung zum Abruf aus, sobald ein späterer Abruf gelingt", async () => {
+      let offline = true;
+      backend = (command) =>
+        command === "refresh_holidays" && offline ? Promise.reject("Feiertage konnten nicht aktualisiert werden.") : answer(command);
+      const wrapper = mount(WeekView, { props: { settingsVersion: 0 } });
+      await flushPromises();
+      expect(wrapper.find('[data-test="holiday-warning"]').exists()).toBe(true);
+      offline = false;
+      await wrapper.setProps({ settingsVersion: 1 });
+      await flushPromises();
+      expect(wrapper.find('[data-test="holiday-warning"]').exists()).toBe(false);
     });
 
     it("meldet geänderte Feiertage nach dem Abruf beim Start und nach „Feiertage laden“", async () => {

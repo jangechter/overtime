@@ -16,6 +16,7 @@ const answer = (command: unknown) => {
     const current = { dailyMinutes: 480, weeklyMinutes: 2400, subdivision: "DE-NW" };
     return { current, pending: null };
   }
+  if (command === "list_subdivisions") return [{ code: "DE-NW", name: "Nordrhein-Westfalen" }];
   if (command === "month_summary") return { actualMinutes: 0, averageMinutes: null, countedDays: 0, otherMinutes: 0, holidaysMissing: false };
   return [];
 };
@@ -154,7 +155,8 @@ describe("App", () => {
       const entries = count("load_entries");
       await wrapper.get("form").trigger("submit");
       await flushPromises();
-      expect(calls).toContainEqual(["save_settings", { daily: "8:00", weekly: "40:00" }]);
+      expect(calls).toContainEqual(["save_settings", { daily: "8:00", weekly: "40:00", subdivision: "DE-NW" }]);
+      expect(count("refresh_holidays")).toBe(2);
       expect(count("week_summary")).toBe(summaries + 1);
       expect(count("load_entries")).toBe(entries + 1);
       wrapper.unmount();

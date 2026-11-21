@@ -9,7 +9,14 @@ const overview = (current = settings(480, 2400), pending: { validFrom: string; s
   current,
   pending,
 });
-let backend: (...args: unknown[]) => Promise<unknown> = async () => overview();
+const SUBDIVISIONS = [
+  { code: "DE-BY", name: "Bayern" },
+  { code: "DE-NW", name: "Nordrhein-Westfalen" },
+];
+let settingsAnswer: (...args: unknown[]) => Promise<unknown> = async () => overview();
+/** `list_subdivisions` antwortet immer mit der Liste, alles andere über `settingsAnswer`. */
+const backend = (...args: unknown[]) =>
+  args[0] === "list_subdivisions" ? Promise.resolve(SUBDIVISIONS) : settingsAnswer(...args);
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: (...args: unknown[]) => {
     calls.push(args);
@@ -24,24 +31,48 @@ const value = (wrapper: ReturnType<typeof mount>, test: string) =>
 describe("SettingsView", () => {
   beforeEach(() => {
     calls.length = 0;
-    backend = async () => overview();
+    settingsAnswer = async () => overview();
   });
 
   it("zeigt die Werte dieser Woche und trägt sie in die Felder ein", async () => {
     const wrapper = mount(SettingsView);
     await flushPromises();
-    expect(calls).toEqual([["load_settings"]]);
-    expect(text(wrapper, "settings-current")).toBe("Diese Woche: Tagessoll 8:00 h, Wochen-Soll 40:00 h");
+    expect(calls).toEqual([["load_settings"], ["list_subdivisions"]]);
+    expect(text(wrapper, "settings-current")).toBe("Diese Woche: Tagessoll 8:00 h, Wochen-Soll 40:00 h, Nordrhein-Westfalen");
     expect(wrapper.find('[data-test="settings-pending"]').exists()).toBe(false);
     expect(value(wrapper, "daily")).toBe("8:00");
     expect(value(wrapper, "weekly")).toBe("40:00");
+    expect(value(wrapper, "subdivision")).toBe("DE-NW");
+  });
+
+  it("bietet die Bundesländer des Backends zur Auswahl", async () => {
+    const wrapper = mount(SettingsView);
+    await flushPromises();
+    const options = wrapper.get('[data-test="subdivision"]').findAll("option");
+    expect(options.map((option) => [option.attributes("value"), option.text()])).toEqual([
+      ["DE-BY", "Bayern"],
+      ["DE-NW", "Nordrhein-Westfalen"],
+    ]);
+  });
+
+  it("speichert einen Wechsel des Bundeslands und zeigt ihn als geplant", async () => {
+    const wrapper = mount(SettingsView);
+    await flushPromises();
+    settingsAnswer = async () =>
+      overview(settings(480, 2400), { validFrom: "2026-11-30", settings: { ...settings(480, 2400), subdivision: "DE-BY" } });
+    await wrapper.get('[data-test="subdivision"]').setValue("DE-BY");
+    await wrapper.get("form").trigger("submit");
+    await flushPromises();
+    expect(calls[calls.length - 1]).toEqual(["save_settings", { daily: "8:00", weekly: "40:00", subdivision: "DE-BY" }]);
+    expect(text(wrapper, "settings-pending")).toBe("Ab Montag, 30.11.2026: Tagessoll 8:00 h, Wochen-Soll 40:00 h, Bayern");
+    expect(value(wrapper, "subdivision")).toBe("DE-BY");
   });
 
   it("zeigt eine geplante Änderung mit ihrem Montag und trägt ihre Werte in die Felder ein", async () => {
-    backend = async () => overview(settings(480, 2400), { validFrom: "2026-11-30", settings: settings(450, 1920) });
+    settingsAnswer = async () => overview(settings(480, 2400), { validFrom: "2026-11-30", settings: settings(450, 1920) });
     const wrapper = mount(SettingsView);
     await flushPromises();
-    expect(text(wrapper, "settings-pending")).toBe("Ab Montag, 30.11.2026: Tagessoll 7:30 h, Wochen-Soll 32:00 h");
+    expect(text(wrapper, "settings-pending")).toBe("Ab Montag, 30.11.2026: Tagessoll 7:30 h, Wochen-Soll 32:00 h, Nordrhein-Westfalen");
     expect(value(wrapper, "daily")).toBe("7:30");
     expect(value(wrapper, "weekly")).toBe("32:00");
   });
@@ -49,20 +80,20 @@ describe("SettingsView", () => {
   it("speichert die Eingaben, zeigt die Antwort des Backends und meldet das Speichern", async () => {
     const wrapper = mount(SettingsView);
     await flushPromises();
-    backend = async () => overview(settings(480, 2400), { validFrom: "2026-11-30", settings: settings(480, 1920) });
+    settingsAnswer = async () => overview(settings(480, 2400), { validFrom: "2026-11-30", settings: settings(480, 1920) });
     await wrapper.get('[data-test="weekly"]').setValue("32:00");
     await wrapper.get("form").trigger("submit");
     await flushPromises();
-    expect(calls[calls.length - 1]).toEqual(["save_settings", { daily: "8:00", weekly: "32:00" }]);
-    expect(text(wrapper, "settings-pending")).toBe("Ab Montag, 30.11.2026: Tagessoll 8:00 h, Wochen-Soll 32:00 h");
-    expect(text(wrapper, "settings-current")).toBe("Diese Woche: Tagessoll 8:00 h, Wochen-Soll 40:00 h");
+    expect(calls[calls.length - 1]).toEqual(["save_settings", { daily: "8:00", weekly: "32:00", subdivision: "DE-NW" }]);
+    expect(text(wrapper, "settings-pending")).toBe("Ab Montag, 30.11.2026: Tagessoll 8:00 h, Wochen-Soll 32:00 h, Nordrhein-Westfalen");
+    expect(text(wrapper, "settings-current")).toBe("Diese Woche: Tagessoll 8:00 h, Wochen-Soll 40:00 h, Nordrhein-Westfalen");
     expect(wrapper.emitted("saved")).toHaveLength(1);
   });
 
   it("zeigt die Meldung des Backends bei einer ungültigen Eingabe und meldet nichts", async () => {
     const wrapper = mount(SettingsView);
     await flushPromises();
-    backend = async () => {
+    settingsAnswer = async () => {
       throw "Bitte das Tagessoll als Stunden und Minuten eingeben, z. B. 8:00.";
     };
     await wrapper.get('[data-test="daily"]').setValue("acht");
@@ -76,12 +107,12 @@ describe("SettingsView", () => {
   it("blendet die Fehlermeldung nach erfolgreichem Speichern aus", async () => {
     const wrapper = mount(SettingsView);
     await flushPromises();
-    backend = async () => {
+    settingsAnswer = async () => {
       throw "Das Tagessoll muss zwischen 0:01 und 24:00 h liegen.";
     };
     await wrapper.get("form").trigger("submit");
     await flushPromises();
-    backend = async () => overview();
+    settingsAnswer = async () => overview();
     await wrapper.get("form").trigger("submit");
     await flushPromises();
     expect(wrapper.find('[data-test="settings-save-error"]').exists()).toBe(false);
@@ -91,7 +122,7 @@ describe("SettingsView", () => {
     const wrapper = mount(SettingsView);
     await flushPromises();
     let finish: (answer: unknown) => void = () => {};
-    backend = () => new Promise((resolve) => (finish = resolve));
+    settingsAnswer = () => new Promise((resolve) => (finish = resolve));
     await wrapper.get("form").trigger("submit");
     await wrapper.get("form").trigger("submit");
     expect(wrapper.get('[data-test="save-settings"]').attributes("disabled")).toBeDefined();
@@ -102,7 +133,7 @@ describe("SettingsView", () => {
   });
 
   it("zeigt eine Meldung, wenn die Einstellungen nicht gelesen werden können", async () => {
-    backend = async () => {
+    settingsAnswer = async () => {
       throw "Die Datenbank konnte nicht gelesen oder geschrieben werden. Bitte die App neu starten.";
     };
     const wrapper = mount(SettingsView);

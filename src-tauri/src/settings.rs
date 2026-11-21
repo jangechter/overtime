@@ -11,6 +11,37 @@ use crate::week::{format_date, monday_of};
 /// „Gilt ab“ des Starteintrags aus der Migration: gilt seit jeher.
 pub const START: &str = "0001-01-01";
 
+/// Die 16 Bundesländer mit ihrem Code für OpenHolidays.
+pub const SUBDIVISIONS: [(&str, &str); 16] = [
+    ("DE-BW", "Baden-Württemberg"),
+    ("DE-BY", "Bayern"),
+    ("DE-BE", "Berlin"),
+    ("DE-BB", "Brandenburg"),
+    ("DE-HB", "Bremen"),
+    ("DE-HH", "Hamburg"),
+    ("DE-HE", "Hessen"),
+    ("DE-MV", "Mecklenburg-Vorpommern"),
+    ("DE-NI", "Niedersachsen"),
+    ("DE-NW", "Nordrhein-Westfalen"),
+    ("DE-RP", "Rheinland-Pfalz"),
+    ("DE-SL", "Saarland"),
+    ("DE-SN", "Sachsen"),
+    ("DE-ST", "Sachsen-Anhalt"),
+    ("DE-SH", "Schleswig-Holstein"),
+    ("DE-TH", "Thüringen"),
+];
+
+/// Ein Bundesland für die Auswahl in der Oberfläche.
+#[derive(Debug, PartialEq, Eq, Serialize)]
+pub struct Subdivision {
+    pub code: &'static str,
+    pub name: &'static str,
+}
+
+pub fn subdivisions() -> Vec<Subdivision> {
+    SUBDIVISIONS.iter().map(|&(code, name)| Subdivision { code, name }).collect()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Settings {
@@ -48,6 +79,28 @@ impl History {
         let (_, settings) = self.0.iter().rev().find(|(valid_from, _)| valid_from.as_str() <= date).unwrap_or(&self.0[0]);
         settings.clone()
     }
+
+    /// Teilt `from` bis `to` (beide einschließlich) in Abschnitte mit je einem Bundesland, als `(von, bis, Bundesland)`.
+    /// Ein Wechsel beginnt immer an einem Montag, deshalb liegt jede Woche ganz in einem Abschnitt.
+    pub fn subdivision_periods(&self, from: &str, to: &str) -> Vec<(String, String, String)> {
+        let mut periods = Vec::new();
+        let (mut start, mut subdivision) = (from.to_string(), self.at(from).subdivision);
+        for (valid_from, settings) in &self.0 {
+            if valid_from.as_str() <= from || valid_from.as_str() > to || settings.subdivision == subdivision {
+                continue;
+            }
+            let day_before = NaiveDate::parse_from_str(valid_from, "%Y-%m-%d")
+                .ok()
+                .and_then(|day| day.pred_opt())
+                .map(format_date)
+                .unwrap_or_else(|| start.clone());
+            periods.push((start, day_before, subdivision));
+            start = valid_from.clone();
+            subdivision = settings.subdivision.clone();
+        }
+        periods.push((start, to.to_string(), subdivision));
+        periods
+    }
 }
 
 /// Eine gespeicherte Änderung, die noch nicht gilt.
@@ -72,6 +125,7 @@ pub enum SettingsError {
     DailyRange,
     WeeklyFormat,
     WeeklyRange,
+    Subdivision,
     /// Es gibt schon Einstellungen für eine Woche nach dem nächsten Montag: Die Systemuhr ging zurück.
     ClockBehind,
     Store(StoreError),
@@ -99,10 +153,17 @@ pub fn overview(store: &Store, today: NaiveDate) -> Result<Overview, StoreError>
     Ok(Overview { current: history.at(&this_monday), pending })
 }
 
-/// Speichert Tagessoll und Wochen-Soll (Text `H:MM`), gültig ab dem Montag der nächsten Woche. Eine noch nicht wirksame
-/// Änderung wird ersetzt; entsprechen die Werte denen der laufenden Woche, wird sie zurückgenommen. Das Bundesland
-/// bleibt, wie es ab nächster Woche gilt.
-pub fn change(store: &Store, today: NaiveDate, daily: &str, weekly: &str) -> Result<Overview, SettingsError> {
+/// Speichert Tagessoll und Wochen-Soll (Text `H:MM`) und Bundesland (Code aus `SUBDIVISIONS`), gültig ab dem Montag
+/// der nächsten Woche. Eine noch nicht wirksame Änderung wird ersetzt; entsprechen die Werte denen der laufenden Woche,
+/// wird sie zurückgenommen. Ändert sich dabei das Bundesland ab nächster Woche, werden die schon geladenen Feiertage ab
+/// dann verworfen.
+pub fn change(
+    store: &Store,
+    today: NaiveDate,
+    daily: &str,
+    weekly: &str,
+    subdivision: &str,
+) -> Result<Overview, SettingsError> {
     let daily_minutes = parse_duration(daily).ok_or(SettingsError::DailyFormat)?;
     if !(1..=1440).contains(&daily_minutes) {
         return Err(SettingsError::DailyRange);
@@ -110,6 +171,9 @@ pub fn change(store: &Store, today: NaiveDate, daily: &str, weekly: &str) -> Res
     let weekly_minutes = parse_duration(weekly).ok_or(SettingsError::WeeklyFormat)?;
     if !(1..=10080).contains(&weekly_minutes) {
         return Err(SettingsError::WeeklyRange);
+    }
+    if !SUBDIVISIONS.iter().any(|&(code, _)| code == subdivision) {
+        return Err(SettingsError::Subdivision);
     }
     let history = History::load(store)?;
     let next = format_date(next_monday(today));
@@ -120,12 +184,9 @@ pub fn change(store: &Store, today: NaiveDate, daily: &str, weekly: &str) -> Res
         return Err(SettingsError::ClockBehind);
     }
     let current = history.at(&format_date(monday_of(today)));
-    let changed = Settings { daily_minutes, weekly_minutes, subdivision: history.at(&next).subdivision };
-    if changed == current {
-        store.delete_settings(&next)?;
-    } else {
-        store.save_settings(&next, &changed)?;
-    }
+    let changed = Settings { daily_minutes, weekly_minutes, subdivision: subdivision.to_string() };
+    let forget_holidays = history.at(&next).subdivision != changed.subdivision;
+    store.change_settings(&next, (changed != current).then_some(&changed), forget_holidays)?;
     Ok(overview(store, today)?)
 }
 
@@ -155,6 +216,7 @@ impl std::fmt::Display for SettingsError {
                 f.write_str("Bitte das Wochen-Soll als Stunden und Minuten eingeben, z. B. 40:00.")
             }
             SettingsError::WeeklyRange => f.write_str("Das Wochen-Soll muss zwischen 0:01 und 168:00 h liegen."),
+            SettingsError::Subdivision => f.write_str("Bitte ein Bundesland aus der Liste wählen."),
             SettingsError::ClockBehind => f.write_str(
                 "Es gibt schon Einstellungen für eine spätere Woche, die Systemuhr geht offenbar falsch. Bitte Datum und Uhrzeit prüfen.",
             ),
@@ -228,7 +290,7 @@ mod tests {
     #[test]
     fn a_change_is_pending_until_next_monday_and_then_applies() {
         let (_dir, store) = open_temp();
-        let saved = change(&store, date("2026-11-25"), "8:00", "32:00").unwrap();
+        let saved = change(&store, date("2026-11-25"), "8:00", "32:00", "DE-NW").unwrap();
         assert_eq!(saved, Overview { current: Settings::default(), pending: pending("2026-11-30", 480, 1920) });
         assert_eq!(overview(&store, date("2026-11-29")).unwrap().current, Settings::default(), "die laufende Woche bleibt");
         assert_eq!(overview(&store, date("2026-11-30")).unwrap(), Overview { current: settings(480, 1920), pending: None });
@@ -237,15 +299,15 @@ mod tests {
     #[test]
     fn a_change_saved_on_a_monday_still_waits_for_the_next_monday() {
         let (_dir, store) = open_temp();
-        let saved = change(&store, date("2026-11-23"), "6:00", "30:00").unwrap();
+        let saved = change(&store, date("2026-11-23"), "6:00", "30:00", "DE-NW").unwrap();
         assert_eq!(saved.pending, pending("2026-11-30", 360, 1800));
     }
 
     #[test]
     fn a_second_change_in_the_same_week_replaces_the_first() {
         let (_dir, store) = open_temp();
-        change(&store, date("2026-11-24"), "8:00", "32:00").unwrap();
-        let saved = change(&store, date("2026-11-26"), "7:00", "35:00").unwrap();
+        change(&store, date("2026-11-24"), "8:00", "32:00", "DE-NW").unwrap();
+        let saved = change(&store, date("2026-11-26"), "7:00", "35:00", "DE-NW").unwrap();
         assert_eq!(saved.pending, pending("2026-11-30", 420, 2100));
         assert_eq!(store.settings_history().unwrap().len(), 2);
     }
@@ -253,8 +315,8 @@ mod tests {
     #[test]
     fn changing_back_to_the_current_values_cancels_the_pending_change() {
         let (_dir, store) = open_temp();
-        change(&store, date("2026-11-24"), "8:00", "32:00").unwrap();
-        let saved = change(&store, date("2026-11-26"), "8:00", "40:00").unwrap();
+        change(&store, date("2026-11-24"), "8:00", "32:00", "DE-NW").unwrap();
+        let saved = change(&store, date("2026-11-26"), "8:00", "40:00", "DE-NW").unwrap();
         assert_eq!(saved, Overview { current: Settings::default(), pending: None });
         assert_eq!(store.settings_history().unwrap(), vec![(START.to_string(), Settings::default())]);
     }
@@ -262,9 +324,9 @@ mod tests {
     #[test]
     fn a_change_that_already_applies_is_never_altered() {
         let (_dir, store) = open_temp();
-        change(&store, date("2026-11-25"), "8:00", "32:00").unwrap();
-        change(&store, date("2026-12-02"), "6:00", "30:00").unwrap();
-        change(&store, date("2026-12-03"), "8:00", "32:00").unwrap();
+        change(&store, date("2026-11-25"), "8:00", "32:00", "DE-NW").unwrap();
+        change(&store, date("2026-12-02"), "6:00", "30:00", "DE-NW").unwrap();
+        change(&store, date("2026-12-03"), "8:00", "32:00", "DE-NW").unwrap();
         let history = History::load(&store).unwrap();
         assert_eq!(history.at("2026-11-30"), settings(480, 1920));
         assert_eq!(history.at("2026-12-07"), settings(480, 1920), "die zurückgenommene Änderung gilt nie");
@@ -274,8 +336,8 @@ mod tests {
     #[test]
     fn several_changes_over_the_year_boundary_each_apply_from_their_monday() {
         let (_dir, store) = open_temp();
-        change(&store, date("2026-12-23"), "8:00", "32:00").unwrap();
-        change(&store, date("2026-12-31"), "6:00", "30:00").unwrap();
+        change(&store, date("2026-12-23"), "8:00", "32:00", "DE-NW").unwrap();
+        change(&store, date("2026-12-31"), "6:00", "30:00", "DE-NW").unwrap();
         let history = History::load(&store).unwrap();
         assert_eq!(history.at("2026-12-27"), Settings::default());
         assert_eq!(history.at("2026-12-28"), settings(480, 1920));
@@ -283,22 +345,160 @@ mod tests {
         assert_eq!(history.at("2027-01-04"), settings(360, 1800));
     }
 
+    // --- Bundesland ---
+
+    fn bavaria() -> Settings {
+        Settings { subdivision: "DE-BY".into(), ..Settings::default() }
+    }
+
+    fn holiday(date: &str) -> crate::store::Holiday {
+        crate::store::Holiday { date: date.into(), name: "Feiertag".into() }
+    }
+
     #[test]
-    fn a_change_keeps_the_subdivision_valid_from_next_week() {
+    fn a_new_subdivision_applies_from_next_monday_and_drops_the_holidays_loaded_from_then() {
+        let (_dir, mut store) = open_temp();
+        store.save_holidays("2026-11-09", "2027-01-31", &[holiday("2026-11-18"), holiday("2026-12-25")]).unwrap();
+        let saved = change(&store, date("2026-11-25"), "8:00", "40:00", "DE-BY").unwrap();
+        assert_eq!(saved, Overview { current: Settings::default(), pending: Some(Pending { valid_from: "2026-11-30".into(), settings: bavaria() }) });
+        assert_eq!(store.holidays_between("2026-01-01", "2027-12-31").unwrap(), vec![holiday("2026-11-18")]);
+        assert!(!store.week_holidays("2026-11-23", "2026-11-29").unwrap().missing, "die laufende Woche bleibt geladen");
+        assert!(store.week_holidays("2026-11-30", "2026-12-06").unwrap().missing);
+    }
+
+    #[test]
+    fn changing_only_the_targets_keeps_the_loaded_holidays() {
+        let (_dir, mut store) = open_temp();
+        store.save_holidays("2026-11-09", "2027-01-31", &[holiday("2026-12-25")]).unwrap();
+        change(&store, date("2026-11-25"), "6:00", "30:00", "DE-NW").unwrap();
+        assert_eq!(store.holidays_between("2026-12-25", "2026-12-25").unwrap(), vec![holiday("2026-12-25")]);
+        assert!(store.is_loaded("2026-11-09", "2027-01-31").unwrap());
+    }
+
+    #[test]
+    fn taking_back_a_new_subdivision_drops_the_holidays_loaded_for_it_again() {
+        let (_dir, mut store) = open_temp();
+        change(&store, date("2026-11-25"), "8:00", "40:00", "DE-BY").unwrap();
+        store.save_holidays("2026-11-30", "2027-01-31", &[holiday("2026-12-08")]).unwrap();
+        let saved = change(&store, date("2026-11-26"), "8:00", "40:00", "DE-NW").unwrap();
+        assert_eq!(saved, Overview { current: Settings::default(), pending: None });
+        assert!(store.holidays_between("2026-11-30", "2027-01-31").unwrap().is_empty());
+        assert!(store.week_holidays("2026-11-30", "2026-12-06").unwrap().missing);
+    }
+
+    #[test]
+    fn changing_the_targets_while_a_new_subdivision_is_pending_keeps_its_holidays() {
+        let (_dir, mut store) = open_temp();
+        change(&store, date("2026-11-25"), "8:00", "40:00", "DE-BY").unwrap();
+        store.save_holidays("2026-11-30", "2027-01-31", &[holiday("2027-01-06")]).unwrap();
+        let saved = change(&store, date("2026-11-26"), "8:00", "32:00", "DE-BY").unwrap();
+        assert_eq!(saved.pending.unwrap().settings, Settings { weekly_minutes: 1920, ..bavaria() });
+        assert_eq!(store.holidays_between("2027-01-06", "2027-01-06").unwrap(), vec![holiday("2027-01-06")]);
+    }
+
+    #[test]
+    fn an_unknown_subdivision_is_rejected_in_german_and_changes_nothing() {
+        let (_dir, mut store) = open_temp();
+        store.save_holidays("2026-11-09", "2027-01-31", &[holiday("2026-12-25")]).unwrap();
+        for code in ["", "NW", "DE-XX", "DE-BY-AU", "de-by"] {
+            let error = change(&store, date("2026-11-25"), "8:00", "40:00", code).err().unwrap();
+            assert_eq!(error.to_string(), "Bitte ein Bundesland aus der Liste wählen.", "{code}");
+        }
+        assert_eq!(store.settings_history().unwrap().len(), 1);
+        assert!(store.is_loaded("2026-11-09", "2027-01-31").unwrap());
+    }
+
+    #[test]
+    fn all_sixteen_subdivisions_are_offered_and_accepted() {
         let (_dir, store) = open_temp();
-        store.save_settings("2026-11-30", &Settings { subdivision: "DE-BY".into(), ..Settings::default() }).unwrap();
-        let saved = change(&store, date("2026-11-25"), "8:00", "32:00").unwrap();
-        assert_eq!(saved.pending.unwrap().settings.subdivision, "DE-BY");
+        let list = subdivisions();
+        assert_eq!(list.len(), 16);
+        assert!(list.contains(&Subdivision { code: "DE-NW", name: "Nordrhein-Westfalen" }));
+        for Subdivision { code, .. } in list {
+            assert!(change(&store, date("2026-11-25"), "8:00", "40:00", code).is_ok(), "{code}");
+        }
+    }
+
+    #[test]
+    fn a_new_subdivision_leaves_target_and_credits_of_the_current_week_unchanged() {
+        let (_dir, mut store) = open_temp();
+        store.save_holidays("2026-11-09", "2027-01-31", &[holiday("2026-11-26"), holiday("2026-12-08")]).unwrap();
+        store.save_absence("2026-11-25", crate::store::Absence::Vacation).unwrap();
+        store.save_absence("2026-11-26", crate::store::Absence::Vacation).unwrap();
+        let before = crate::target::week_summary(&store, "2026-11-25").unwrap();
+        change(&store, date("2026-11-25"), "8:00", "40:00", "DE-BY").unwrap();
+        assert_eq!(crate::target::week_summary(&store, "2026-11-25").unwrap(), before);
+        assert_eq!((before.target_minutes, before.actual_minutes, before.target_incomplete), (1920, 480, false), "Urlaub am Feiertag zählt 0");
+        let next = crate::target::week_summary(&store, "2026-12-01").unwrap();
+        assert_eq!((next.target_minutes, next.target_incomplete), (2400, true), "Feiertage des neuen Bundeslands fehlen noch");
+    }
+
+    #[test]
+    fn a_period_switching_back_and_forth_gets_three_parts() {
+        let (_dir, store) = open_temp();
+        store.save_settings("2026-11-30", &bavaria()).unwrap();
+        store.save_settings("2026-12-14", &Settings::default()).unwrap();
+        assert_eq!(
+            History::load(&store).unwrap().subdivision_periods("2026-11-23", "2026-12-27"),
+            vec![
+                ("2026-11-23".to_string(), "2026-11-29".to_string(), "DE-NW".to_string()),
+                ("2026-11-30".to_string(), "2026-12-13".to_string(), "DE-BY".to_string()),
+                ("2026-12-14".to_string(), "2026-12-27".to_string(), "DE-NW".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_period_without_a_change_of_subdivision_stays_whole() {
+        let (_dir, store) = open_temp();
+        store.save_settings("2026-11-30", &settings(360, 1800)).unwrap();
+        let history = History::load(&store).unwrap();
+        assert_eq!(
+            history.subdivision_periods("2026-11-09", "2027-01-31"),
+            vec![("2026-11-09".to_string(), "2027-01-31".to_string(), "DE-NW".to_string())]
+        );
+    }
+
+    #[test]
+    fn a_period_is_split_at_each_change_of_subdivision() {
+        let (_dir, store) = open_temp();
+        store.save_settings("2026-11-30", &bavaria()).unwrap();
+        store.save_settings("2027-01-04", &Settings { subdivision: "DE-SN".into(), ..Settings::default() }).unwrap();
+        store.save_settings("2027-03-01", &settings(360, 1800)).unwrap();
+        let history = History::load(&store).unwrap();
+        assert_eq!(
+            history.subdivision_periods("2026-11-09", "2027-01-31"),
+            vec![
+                ("2026-11-09".to_string(), "2026-11-29".to_string(), "DE-NW".to_string()),
+                ("2026-11-30".to_string(), "2027-01-03".to_string(), "DE-BY".to_string()),
+                ("2027-01-04".to_string(), "2027-01-31".to_string(), "DE-SN".to_string()),
+            ]
+        );
+        assert_eq!(
+            history.subdivision_periods("2026-12-07", "2026-12-13"),
+            vec![("2026-12-07".to_string(), "2026-12-13".to_string(), "DE-BY".to_string())]
+        );
+    }
+
+    #[test]
+    fn a_change_on_the_first_day_of_a_period_does_not_split_it() {
+        let (_dir, store) = open_temp();
+        store.save_settings("2026-11-30", &bavaria()).unwrap();
+        let history = History::load(&store).unwrap();
+        assert_eq!(
+            history.subdivision_periods("2026-11-30", "2026-12-06"),
+            vec![("2026-11-30".to_string(), "2026-12-06".to_string(), "DE-BY".to_string())]
+        );
     }
 
     #[test]
     fn a_clock_set_back_cannot_replace_or_cancel_settings_that_already_apply() {
         let (_dir, store) = open_temp();
-        change(&store, date("2026-11-25"), "8:00", "32:00").unwrap();
-        change(&store, date("2026-12-02"), "6:00", "30:00").unwrap();
+        change(&store, date("2026-11-25"), "8:00", "32:00", "DE-NW").unwrap();
+        change(&store, date("2026-12-02"), "6:00", "30:00", "DE-NW").unwrap();
         let before = store.settings_history().unwrap();
         for (daily, weekly) in [("7:00", "35:00"), ("8:00", "40:00")] {
-            let error = change(&store, date("2026-11-25"), daily, weekly).err().unwrap();
+            let error = change(&store, date("2026-11-25"), daily, weekly, "DE-NW").err().unwrap();
             assert!(matches!(error, SettingsError::ClockBehind), "{daily} / {weekly}");
             assert_eq!(
                 error.to_string(),
@@ -319,8 +519,8 @@ mod tests {
     #[test]
     fn a_pending_change_across_the_month_and_year_boundary_is_replaced_and_then_applies() {
         let (_dir, store) = open_temp();
-        change(&store, date("2026-12-29"), "8:00", "32:00").unwrap();
-        let saved = change(&store, date("2027-01-02"), "7:00", "35:00").unwrap();
+        change(&store, date("2026-12-29"), "8:00", "32:00", "DE-NW").unwrap();
+        let saved = change(&store, date("2027-01-02"), "7:00", "35:00", "DE-NW").unwrap();
         assert_eq!(saved.pending, pending("2027-01-04", 420, 2100));
         assert_eq!(overview(&store, date("2027-01-04")).unwrap(), Overview { current: settings(420, 2100), pending: None });
     }
@@ -337,7 +537,7 @@ mod tests {
             "Die gespeicherten Einstellungen sind unvollständig, deshalb kann nicht gerechnet werden. Bitte die Datenbank prüfen."
         );
         assert!(matches!(crate::target::week_summary(&store, "2026-12-02"), Err(StoreError::MissingSettings)));
-        assert!(matches!(change(&store, date("2026-11-25"), "8:00", "40:00"), Err(SettingsError::Store(StoreError::MissingSettings))));
+        assert!(matches!(change(&store, date("2026-11-25"), "8:00", "40:00", "DE-NW"), Err(SettingsError::Store(StoreError::MissingSettings))));
     }
 
     #[test]
@@ -351,7 +551,7 @@ mod tests {
             ("0:01", "0:01", (1, 1)),
             ("24:00", "100:00", (1440, 6000)),
         ] {
-            let current = change(&store, date("2026-11-25"), daily, weekly).unwrap();
+            let current = change(&store, date("2026-11-25"), daily, weekly, "DE-NW").unwrap();
             let values = current.pending.map(|p| (p.settings.daily_minutes, p.settings.weekly_minutes)).unwrap_or((480, 2400));
             assert_eq!(values, expected, "{daily} / {weekly}");
         }
@@ -361,11 +561,11 @@ mod tests {
     fn malformed_durations_are_rejected_in_german_and_store_nothing() {
         let (_dir, store) = open_temp();
         for daily in ["", "8h", "8,5", "8:5", "8:60", "-1:00", "1000:00", "8:00:00", "acht"] {
-            let error = change(&store, date("2026-11-25"), daily, "40:00").err().unwrap();
+            let error = change(&store, date("2026-11-25"), daily, "40:00", "DE-NW").err().unwrap();
             assert!(matches!(error, SettingsError::DailyFormat), "{daily}");
             assert_eq!(error.to_string(), "Bitte das Tagessoll als Stunden und Minuten eingeben, z. B. 8:00.");
         }
-        let error = change(&store, date("2026-11-25"), "8:00", "vierzig").err().unwrap();
+        let error = change(&store, date("2026-11-25"), "8:00", "vierzig", "DE-NW").err().unwrap();
         assert_eq!(error.to_string(), "Bitte das Wochen-Soll als Stunden und Minuten eingeben, z. B. 40:00.");
         assert_eq!(store.settings_history().unwrap().len(), 1);
     }
@@ -379,7 +579,7 @@ mod tests {
             ("8:00", "0:00", "Das Wochen-Soll muss zwischen 0:01 und 168:00 h liegen."),
             ("8:00", "168:01", "Das Wochen-Soll muss zwischen 0:01 und 168:00 h liegen."),
         ] {
-            assert_eq!(change(&store, date("2026-11-25"), daily, weekly).err().unwrap().to_string(), message);
+            assert_eq!(change(&store, date("2026-11-25"), daily, weekly, "DE-NW").err().unwrap().to_string(), message);
         }
         assert_eq!(store.settings_history().unwrap().len(), 1);
     }

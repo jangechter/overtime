@@ -116,11 +116,22 @@ fn load_settings(state: tauri::State<AppStore>) -> Result<settings::Overview, St
     settings::overview(&store, chrono::Local::now().date_naive()).map_err(|e| e.to_string())
 }
 
-/// Speichert Tagessoll und Wochen-Soll (`H:MM`), gültig ab dem Montag der nächsten Woche.
+/// Speichert Tagessoll und Wochen-Soll (`H:MM`) und Bundesland (Code), gültig ab dem Montag der nächsten Woche.
 #[tauri::command]
-fn save_settings(state: tauri::State<AppStore>, daily: String, weekly: String) -> Result<settings::Overview, String> {
+fn save_settings(
+    state: tauri::State<AppStore>,
+    daily: String,
+    weekly: String,
+    subdivision: String,
+) -> Result<settings::Overview, String> {
     let store = lock(&state)?;
-    settings::change(&store, chrono::Local::now().date_naive(), &daily, &weekly).map_err(|e| e.to_string())
+    settings::change(&store, chrono::Local::now().date_naive(), &daily, &weekly, &subdivision).map_err(|e| e.to_string())
+}
+
+/// Die wählbaren Bundesländer mit Code und Namen.
+#[tauri::command]
+fn list_subdivisions() -> Vec<settings::Subdivision> {
+    settings::subdivisions()
 }
 
 #[tauri::command]
@@ -200,7 +211,7 @@ pub fn run() {
             app.manage(AppStore(open_store(&dir.join("overtime.db"), chrono::Local::now().date_naive())));
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![save_entry, delete_entry, mark_absence, load_entries, week_summary, month_summary, load_settings, save_settings, load_holidays, refresh_holidays, fetch_week_holidays, export_csv])
+        .invoke_handler(tauri::generate_handler![save_entry, delete_entry, mark_absence, load_entries, week_summary, month_summary, load_settings, save_settings, list_subdivisions, load_holidays, refresh_holidays, fetch_week_holidays, export_csv])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
@@ -268,7 +279,7 @@ mod tests {
     struct EmptyApi;
 
     impl holidays::HolidayApi for EmptyApi {
-        fn fetch(&self, _from: &str, _to: &str) -> Result<String, holidays::HolidayError> {
+        fn fetch(&self, _subdivision: &str, _from: &str, _to: &str) -> Result<String, holidays::HolidayError> {
             Ok("[]".to_string())
         }
     }

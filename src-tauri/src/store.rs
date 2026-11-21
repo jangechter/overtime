@@ -3,6 +3,7 @@
 use std::path::Path;
 
 use rusqlite::types::{FromSql, FromSqlError, FromSqlResult, ToSql, ToSqlOutput, ValueRef};
+use chrono::NaiveDate;
 use rusqlite::{Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
@@ -240,8 +241,9 @@ impl Store {
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
-    /// Speichert Einstellungen, die ab `valid_from` gelten, und ersetzt einen Eintrag mit demselben Datum.
-    /// Ab wann sie gelten dürfen, entscheidet `settings::change`.
+    /// Testhilfe: speichert Einstellungen ab `valid_from` ohne Prüfung und ohne Verwerfen von Feiertagen.
+    /// Die App ändert Einstellungen nur über `settings::change` und `change_settings`.
+    #[cfg(test)]
     pub fn save_settings(&self, valid_from: &str, settings: &Settings) -> Result<(), StoreError> {
         check_date(valid_from)?;
         self.conn.execute(
@@ -251,10 +253,43 @@ impl Store {
         Ok(())
     }
 
-    /// Löscht die Einstellungen, die ab `valid_from` gelten würden (eine zurückgenommene, noch nicht wirksame Änderung).
+    /// Testhilfe: löscht die Einstellungen ab `valid_from` ohne Verwerfen von Feiertagen.
+    #[cfg(test)]
     pub fn delete_settings(&self, valid_from: &str) -> Result<(), StoreError> {
         check_date(valid_from)?;
         self.conn.execute("DELETE FROM settings WHERE valid_from = ?1", [valid_from])?;
+        Ok(())
+    }
+
+    /// Speichert (`Some`) oder löscht (`None`) die Einstellungen ab `valid_from`. Mit `forget_holidays` (Wechsel des
+    /// Bundeslands) werden dabei die Feiertage ab `valid_from` verworfen und die geladenen Zeiträume dort beendet, damit
+    /// der nächste Abruf diese Wochen mit dem neuen Bundesland holt. Alles oder nichts.
+    pub fn change_settings(
+        &self,
+        valid_from: &str,
+        settings: Option<&Settings>,
+        forget_holidays: bool,
+    ) -> Result<(), StoreError> {
+        check_date(valid_from)?;
+        let day_before = NaiveDate::parse_from_str(valid_from, "%Y-%m-%d")
+            .ok()
+            .and_then(|day| day.pred_opt())
+            .map(|day| day.format("%Y-%m-%d").to_string())
+            .ok_or(StoreError::InvalidDate)?;
+        let tx = self.conn.unchecked_transaction()?;
+        if forget_holidays {
+            tx.execute("DELETE FROM holidays WHERE date >= ?1", [valid_from])?;
+            tx.execute("DELETE FROM loaded_ranges WHERE from_date >= ?1", [valid_from])?;
+            tx.execute("UPDATE loaded_ranges SET to_date = ?2 WHERE to_date >= ?1", [valid_from, &day_before])?;
+        }
+        match settings {
+            Some(settings) => tx.execute(
+                "INSERT OR REPLACE INTO settings (valid_from, daily_minutes, weekly_minutes, subdivision) VALUES (?1, ?2, ?3, ?4)",
+                (valid_from, settings.daily_minutes, settings.weekly_minutes, &settings.subdivision),
+            )?,
+            None => tx.execute("DELETE FROM settings WHERE valid_from = ?1", [valid_from])?,
+        };
+        tx.commit()?;
         Ok(())
     }
 
@@ -1043,6 +1078,42 @@ mod tests {
             assert_eq!(error, "Die Datenbank konnte nicht gelesen oder geschrieben werden. Bitte die App neu starten.");
         }
         assert!(matches!(store.save_settings("morgen", &Settings::default()), Err(StoreError::InvalidDate)));
+    }
+
+    #[test]
+    fn changing_settings_with_forgetting_drops_holidays_and_loaded_ranges_from_that_monday_only() {
+        let (_dir, mut store) = open_temp();
+        store.save_holidays("2026-11-02", "2027-01-24", &[holiday("2026-11-01", "Alt"), holiday("2026-11-27", "Vorher"), holiday("2026-12-25", "Weihnachten")]).unwrap();
+        store.save_holidays("2027-03-01", "2027-03-07", &[]).unwrap();
+        let bavaria = Settings { subdivision: "DE-BY".into(), ..Settings::default() };
+        store.change_settings("2026-11-30", Some(&bavaria), true).unwrap();
+        assert_eq!(store.settings_history().unwrap()[1], ("2026-11-30".to_string(), bavaria));
+        assert_eq!(store.holidays_between("2026-01-01", "2027-12-31").unwrap(), vec![holiday("2026-11-01", "Alt"), holiday("2026-11-27", "Vorher")]);
+        assert_eq!(store.loaded_ranges().unwrap(), vec![("2026-11-02".to_string(), "2026-11-29".to_string())]);
+        assert!(store.week_holidays("2026-11-23", "2026-11-29").unwrap().holidays.len() == 1);
+        assert!(store.week_holidays("2026-11-30", "2026-12-06").unwrap().missing);
+    }
+
+    #[test]
+    fn changing_settings_without_forgetting_keeps_the_holidays() {
+        let (_dir, mut store) = open_temp();
+        store.save_holidays("2026-11-02", "2027-01-24", &[holiday("2026-12-25", "Weihnachten")]).unwrap();
+        store.change_settings("2026-11-30", Some(&Settings { daily_minutes: 360, ..Settings::default() }), false).unwrap();
+        store.change_settings("2026-11-30", None, false).unwrap();
+        assert_eq!(store.settings_history().unwrap().len(), 1);
+        assert_eq!(store.holidays_between("2026-12-25", "2026-12-25").unwrap().len(), 1);
+        assert!(store.is_loaded("2026-11-02", "2027-01-24").unwrap());
+    }
+
+    #[test]
+    fn a_failed_settings_change_forgets_no_holidays() {
+        let (_dir, mut store) = open_temp();
+        store.save_holidays("2026-11-02", "2027-01-24", &[holiday("2026-12-25", "Weihnachten")]).unwrap();
+        let invalid = Settings { daily_minutes: 0, ..Settings::default() };
+        assert!(store.change_settings("2026-11-30", Some(&invalid), true).is_err());
+        assert_eq!(store.holidays_between("2026-12-25", "2026-12-25").unwrap().len(), 1);
+        assert!(store.is_loaded("2026-11-02", "2027-01-24").unwrap());
+        assert!(matches!(store.change_settings("morgen", None, true), Err(StoreError::InvalidDate)));
     }
 
     #[test]

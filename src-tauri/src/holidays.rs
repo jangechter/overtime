@@ -1,4 +1,4 @@
-//! Feiertage NRW von OpenHolidays: Zeitfenster, Abruf, Parsen und Aktualisieren des Speichers.
+//! Feiertage von OpenHolidays: Zeitfenster, Abruf je Bundesland, Parsen und Aktualisieren des Speichers.
 
 use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
@@ -6,6 +6,7 @@ use std::time::Duration;
 use chrono::{Datelike, Days, Months, NaiveDate};
 use serde::Deserialize;
 
+use crate::settings::History;
 use crate::store::{Holiday, Store, StoreError};
 use crate::week::{format_date, week_of};
 
@@ -28,19 +29,20 @@ impl From<StoreError> for HolidayError {
     }
 }
 
-/// Quelle der Feiertage; in Tests durch eine Attrappe ersetzt. Liefert den Antworttext der API.
+/// Quelle der Feiertage; in Tests durch eine Attrappe ersetzt. Liefert den Antworttext der API für ein Bundesland
+/// (`subdivision`, z. B. `DE-NW`).
 pub trait HolidayApi {
-    fn fetch(&self, from: &str, to: &str) -> Result<String, HolidayError>;
+    fn fetch(&self, subdivision: &str, from: &str, to: &str) -> Result<String, HolidayError>;
 }
 
 pub struct OpenHolidays;
 
 impl HolidayApi for OpenHolidays {
-    fn fetch(&self, from: &str, to: &str) -> Result<String, HolidayError> {
+    fn fetch(&self, subdivision: &str, from: &str, to: &str) -> Result<String, HolidayError> {
         let agent: ureq::Agent =
             ureq::Agent::config_builder().timeout_global(Some(Duration::from_secs(10))).build().into();
         let mut response = agent
-            .get(request_url(from, to))
+            .get(request_url(subdivision, from, to))
             .header("Accept", "application/json")
             .call()
             .map_err(|e| HolidayError::Fetch(e.to_string()))?;
@@ -58,9 +60,9 @@ pub fn window(today: NaiveDate) -> (String, String) {
     (format_date(monday), format_date(sunday))
 }
 
-fn request_url(from: &str, to: &str) -> String {
+fn request_url(subdivision: &str, from: &str, to: &str) -> String {
     format!(
-        "https://openholidaysapi.org/PublicHolidays?countryIsoCode=DE&subdivisionCode=DE-NW&languageIsoCode=DE&validFrom={from}&validTo={to}"
+        "https://openholidaysapi.org/PublicHolidays?countryIsoCode=DE&subdivisionCode={subdivision}&languageIsoCode=DE&validFrom={from}&validTo={to}"
     )
 }
 
@@ -69,6 +71,15 @@ struct ApiHoliday {
     #[serde(rename = "startDate")]
     start_date: String,
     name: Vec<ApiName>,
+    #[serde(default)]
+    nationwide: bool,
+    #[serde(default)]
+    subdivisions: Vec<ApiSubdivision>,
+}
+
+#[derive(Deserialize)]
+struct ApiSubdivision {
+    code: String,
 }
 
 #[derive(Deserialize)]
@@ -77,12 +88,14 @@ struct ApiName {
     text: String,
 }
 
-/// Liest die Antwort der API. Die API liefert für NRW bundesweite (`nationwide`) und regionale Feiertage
-/// in einer Liste; beide werden übernommen. Öffentliche Feiertage sind eintägig, es zählt `startDate`.
-fn parse(json: &str) -> Result<Vec<Holiday>, HolidayError> {
+/// Liest die Antwort der API für `subdivision`. Übernommen werden bundesweite Feiertage (`nationwide`) und solche, die
+/// im ganzen Bundesland gelten (sein Code steht in `subdivisions`). Feiertage nur für einen Teil des Landes (z. B.
+/// `DE-BY-AU`, Augsburger Friedensfest) fallen weg. Öffentliche Feiertage sind eintägig, es zählt `startDate`.
+fn parse(json: &str, subdivision: &str) -> Result<Vec<Holiday>, HolidayError> {
     let parsed: Vec<ApiHoliday> = serde_json::from_str(json).map_err(|e| HolidayError::Parse(e.to_string()))?;
     parsed
         .into_iter()
+        .filter(|holiday| holiday.nationwide || holiday.subdivisions.iter().any(|part| part.code == subdivision))
         .map(|holiday| {
             let date = NaiveDate::parse_from_str(&holiday.start_date, "%Y-%m-%d")
                 .ok()
@@ -100,11 +113,28 @@ fn parse(json: &str) -> Result<Vec<Holiday>, HolidayError> {
         .collect()
 }
 
-/// Holt das Fenster um `today` von `api` und ersetzt damit die gespeicherten Feiertage des Fensters.
-/// Der Datenspeicher wird erst nach dem Abruf gesperrt, damit Eingaben währenddessen nicht warten.
+/// Holt das Fenster um `today` von `api` und ersetzt damit die gespeicherten Feiertage des Fensters. Das Fenster wird
+/// nach der Einstellungshistorie geteilt, jeder Abschnitt mit seinem Bundesland geholt; so behalten vergangene und
+/// laufende Wochen nach einem Wechsel die Feiertage des alten Bundeslands. Gespeichert wird erst, wenn alle Abschnitte
+/// da sind. Der Datenspeicher wird nur kurz zum Lesen der Historie und zum Speichern gesperrt.
 pub fn refresh(store: &Mutex<Store>, api: &dyn HolidayApi, today: NaiveDate) -> Result<(), HolidayError> {
     let (from, to) = window(today);
-    fetch_and_save(store, api, &from, &to)
+    let periods = History::load(&*lock(store)?)?.subdivision_periods(&from, &to);
+    let mut fetched = Vec::new();
+    for (start, end, subdivision) in &periods {
+        let holidays = within(parse(&api.fetch(subdivision, start, end)?, subdivision)?, start, end);
+        fetched.push((start, end, holidays));
+    }
+    let mut store = lock(store)?;
+    // Während des Abrufs (ohne Sperre) kann ein Bundeslandwechsel gespeichert worden sein; dann gehörten die Abschnitte
+    // zum alten Bundesland. Geprüft wird unter derselben Sperre wie beim Speichern der Einstellungen.
+    if History::load(&store)?.subdivision_periods(&from, &to) != periods {
+        return Err(HolidayError::Fetch("Einstellungen während des Abrufs geändert".into()));
+    }
+    for (start, end, holidays) in fetched {
+        store.save_holidays(start, end, &holidays)?;
+    }
+    Ok(())
 }
 
 /// Holt genau die Woche, in der `date` liegt, von `api` und ersetzt damit ihre gespeicherten Feiertage.
@@ -112,19 +142,33 @@ pub fn refresh(store: &Mutex<Store>, api: &dyn HolidayApi, today: NaiveDate) -> 
 /// nicht nachträglich überschrieben werden.
 pub fn load_week(store: &Mutex<Store>, api: &dyn HolidayApi, date: &str) -> Result<(), HolidayError> {
     let (from, to) = week_of(date)?;
-    if lock(store)?.is_loaded(&from, &to)? {
-        return Ok(());
+    let subdivision = {
+        let store = lock(store)?;
+        if store.is_loaded(&from, &to)? {
+            return Ok(());
+        }
+        History::load(&store)?.at(&from).subdivision
+    };
+    let holidays = api
+        .fetch(&subdivision, &from, &to)
+        .and_then(|json| parse(&json, &subdivision))
+        .map(|holidays| within(holidays, &from, &to))
+        .map_err(|e| match e {
+            HolidayError::Fetch(detail) | HolidayError::Parse(detail) => HolidayError::WeekUnavailable(detail),
+            other => other,
+        })?;
+    let mut store = lock(store)?;
+    if History::load(&store)?.at(&from).subdivision != subdivision {
+        return Err(HolidayError::WeekUnavailable("Einstellungen während des Abrufs geändert".into()));
     }
-    fetch_and_save(store, api, &from, &to).map_err(|e| match e {
-        HolidayError::Fetch(detail) | HolidayError::Parse(detail) => HolidayError::WeekUnavailable(detail),
-        other => other,
-    })
+    store.save_holidays(&from, &to, &holidays)?;
+    Ok(())
 }
 
-fn fetch_and_save(store: &Mutex<Store>, api: &dyn HolidayApi, from: &str, to: &str) -> Result<(), HolidayError> {
-    let holidays = parse(&api.fetch(from, to)?)?;
-    lock(store)?.save_holidays(from, to, &holidays)?;
-    Ok(())
+/// Nur die Feiertage im angefragten Zeitraum, damit die Antwort für einen Abschnitt keinen anderen (mit anderem
+/// Bundesland) überschreibt.
+fn within(holidays: Vec<Holiday>, from: &str, to: &str) -> Vec<Holiday> {
+    holidays.into_iter().filter(|holiday| from <= holiday.date.as_str() && holiday.date.as_str() <= to).collect()
 }
 
 fn lock(store: &Mutex<Store>) -> Result<MutexGuard<'_, Store>, HolidayError> {
@@ -189,7 +233,7 @@ mod tests {
     }
 
     impl HolidayApi for FakeApi {
-        fn fetch(&self, from: &str, to: &str) -> Result<String, HolidayError> {
+        fn fetch(&self, _subdivision: &str, from: &str, to: &str) -> Result<String, HolidayError> {
             self.requests.borrow_mut().push((from.to_string(), to.to_string()));
             self.answer.clone().map_err(|_| HolidayError::Fetch("kein Netz".into()))
         }
@@ -224,23 +268,40 @@ mod tests {
     }
 
     #[test]
-    fn request_asks_for_public_holidays_of_nrw_in_german() {
+    fn request_asks_for_public_holidays_of_the_subdivision_in_german() {
         assert_eq!(
-            request_url("2026-12-06", "2027-02-20"),
+            request_url("DE-NW", "2026-12-06", "2027-02-20"),
             "https://openholidaysapi.org/PublicHolidays?countryIsoCode=DE&subdivisionCode=DE-NW&languageIsoCode=DE&validFrom=2026-12-06&validTo=2027-02-20"
         );
+        assert!(request_url("DE-BY", "2027-01-04", "2027-01-10").contains("subdivisionCode=DE-BY&"));
     }
 
     #[test]
     fn parse_keeps_nationwide_and_regional_holidays() {
         let json = format!("[{ALL_SAINTS},{CHRISTMAS},{NEW_YEAR}]");
         assert_eq!(
-            parse(&json).unwrap(),
+            parse(&json, "DE-NW").unwrap(),
             vec![
                 holiday("2026-11-01", "Allerheiligen"),
                 holiday("2026-12-25", "1. Weihnachtsfeiertag"),
                 holiday("2027-01-01", "Neujahr"),
             ]
+        );
+    }
+
+    const AUGSBURG: &str = r#"{"startDate":"2026-08-08","name":[{"language":"DE","text":"Friedensfest"}],"regionalScope":"Local","nationwide":false,"subdivisions":[{"code":"DE-BY-AU","shortName":"BY-AU"}]}"#;
+    const ASSUMPTION: &str = r#"{"startDate":"2026-08-15","name":[{"language":"DE","text":"Mariä Himmelfahrt"}],"regionalScope":"Regional","nationwide":false,"subdivisions":[{"code":"DE-SL","shortName":"SL"},{"code":"DE-BY","shortName":"BY"}]}"#;
+
+    #[test]
+    fn parse_drops_holidays_of_other_subdivisions_and_of_only_part_of_the_subdivision() {
+        let json = format!("[{CHRISTMAS},{ALL_SAINTS},{AUGSBURG},{ASSUMPTION}]");
+        assert_eq!(
+            parse(&json, "DE-BY").unwrap(),
+            vec![holiday("2026-12-25", "1. Weihnachtsfeiertag"), holiday("2026-08-15", "Mariä Himmelfahrt")]
+        );
+        assert_eq!(
+            parse(&json, "DE-NW").unwrap(),
+            vec![holiday("2026-12-25", "1. Weihnachtsfeiertag"), holiday("2026-11-01", "Allerheiligen")]
         );
     }
 
@@ -255,27 +316,27 @@ mod tests {
             r#""name":[{"language":"EN","text":"New Year's Day"}]"#,
         );
         assert_eq!(
-            parse(&format!("[{two_names},{english_only}]")).unwrap(),
+            parse(&format!("[{two_names},{english_only}]"), "DE-NW").unwrap(),
             vec![holiday("2026-12-25", "1. Weihnachtsfeiertag"), holiday("2027-01-01", "New Year's Day")]
         );
     }
 
     #[test]
     fn parse_accepts_an_empty_answer() {
-        assert_eq!(parse("[]").unwrap(), vec![]);
+        assert_eq!(parse("[]", "DE-NW").unwrap(), vec![]);
     }
 
     #[test]
     fn parse_rejects_answers_that_are_not_a_holiday_list() {
         for body in ["", "<html>Bad Gateway</html>", "{}", r#"{"title":"Bad Request"}"#, "[{}]"] {
-            assert!(matches!(parse(body), Err(HolidayError::Parse(_))), "{body}");
+            assert!(matches!(parse(body, "DE-NW"), Err(HolidayError::Parse(_))), "{body}");
         }
     }
 
     #[test]
     fn parse_rejects_a_holiday_with_a_malformed_date() {
         let broken = CHRISTMAS.replace("2026-12-25", "25.12.2026");
-        assert!(matches!(parse(&format!("[{broken}]")), Err(HolidayError::Parse(_))));
+        assert!(matches!(parse(&format!("[{broken}]"), "DE-NW"), Err(HolidayError::Parse(_))));
     }
 
     #[test]
@@ -443,6 +504,145 @@ mod tests {
                 missing: false
             }
         );
+    }
+
+    // --- Bundesland ---
+
+    /// Antwortet je Bundesland mit eigenem Text und merkt sich die Anfragen.
+    struct ApiBySubdivision {
+        answers: Vec<(&'static str, String)>,
+        offline_for: Option<&'static str>,
+        asked: RefCell<Vec<(String, String, String)>>,
+    }
+
+    impl ApiBySubdivision {
+        fn new(answers: Vec<(&'static str, String)>) -> ApiBySubdivision {
+            ApiBySubdivision { answers, offline_for: None, asked: RefCell::new(Vec::new()) }
+        }
+    }
+
+    impl HolidayApi for ApiBySubdivision {
+        fn fetch(&self, subdivision: &str, from: &str, to: &str) -> Result<String, HolidayError> {
+            self.asked.borrow_mut().push((subdivision.to_string(), from.to_string(), to.to_string()));
+            if self.offline_for == Some(subdivision) {
+                return Err(HolidayError::Fetch("kein Netz".into()));
+            }
+            Ok(self.answers.iter().find(|(code, _)| *code == subdivision).map(|(_, body)| body.clone()).unwrap_or("[]".into()))
+        }
+    }
+
+    const EPIPHANY: &str = r#"{"startDate":"2027-01-06","name":[{"language":"DE","text":"Heilige Drei Könige"}],"regionalScope":"Regional","nationwide":false,"subdivisions":[{"code":"DE-BW","shortName":"BW"},{"code":"DE-BY","shortName":"BY"}]}"#;
+
+    fn bavaria_from(store: &Mutex<Store>, monday: &str) {
+        let bavaria = crate::settings::Settings { subdivision: "DE-BY".into(), ..Default::default() };
+        store.lock().unwrap().save_settings(monday, &bavaria).unwrap();
+    }
+
+    #[test]
+    fn refresh_asks_for_each_part_of_the_window_with_the_subdivision_valid_in_it() {
+        let (_dir, store) = open_temp();
+        bavaria_from(&store, "2026-11-30");
+        let api = ApiBySubdivision::new(vec![("DE-NW", format!("[{ALL_SAINTS}]")), ("DE-BY", format!("[{CHRISTMAS},{EPIPHANY}]"))]);
+        refresh(&store, &api, date("2026-11-20")).unwrap();
+        assert_eq!(
+            *api.asked.borrow(),
+            vec![
+                ("DE-NW".to_string(), "2026-11-02".to_string(), "2026-11-29".to_string()),
+                ("DE-BY".to_string(), "2026-11-30".to_string(), "2027-01-24".to_string()),
+            ]
+        );
+        let store = store.lock().unwrap();
+        assert_eq!(
+            store.holidays_between("2026-11-01", "2027-01-31").unwrap(),
+            vec![holiday("2026-12-25", "1. Weihnachtsfeiertag"), holiday("2027-01-06", "Heilige Drei Könige")]
+        );
+        assert!(!store.week_holidays("2026-11-23", "2026-11-29").unwrap().missing);
+        assert!(!store.week_holidays("2026-11-30", "2026-12-06").unwrap().missing);
+    }
+
+    #[test]
+    fn past_and_current_weeks_keep_the_holidays_of_the_old_subdivision_after_a_change() {
+        let (_dir, store) = open_temp();
+        let nrw_and_bavaria = ApiBySubdivision::new(vec![
+            ("DE-NW", r#"[{"startDate":"2026-11-18","name":[{"language":"DE","text":"NRW-Feiertag"}],"nationwide":false,"subdivisions":[{"code":"DE-NW"}]}]"#.to_string()),
+            ("DE-BY", r#"[{"startDate":"2026-11-18","name":[{"language":"DE","text":"Bayern-Feiertag"}],"nationwide":false,"subdivisions":[{"code":"DE-BY"}]}]"#.to_string()),
+        ]);
+        refresh(&store, &nrw_and_bavaria, date("2026-11-25")).unwrap();
+        crate::settings::change(&store.lock().unwrap(), date("2026-11-25"), "8:00", "40:00", "DE-BY").unwrap();
+        refresh(&store, &nrw_and_bavaria, date("2026-11-26")).unwrap();
+        assert_eq!(store.lock().unwrap().holidays_between("2026-11-18", "2026-11-18").unwrap(), vec![holiday("2026-11-18", "NRW-Feiertag")]);
+        assert!(nrw_and_bavaria.asked.borrow().iter().any(|(code, from, _)| code == "DE-BY" && from == "2026-11-30"));
+    }
+
+    #[test]
+    fn refresh_stores_nothing_when_one_part_of_the_window_fails() {
+        let (_dir, store) = open_temp();
+        store.lock().unwrap().save_holidays("2026-11-02", "2027-01-24", &[holiday("2026-12-25", "Alt")]).unwrap();
+        bavaria_from(&store, "2026-11-30");
+        let mut api = ApiBySubdivision::new(vec![("DE-NW", "[]".to_string())]);
+        api.offline_for = Some("DE-BY");
+        assert!(matches!(refresh(&store, &api, date("2026-11-20")), Err(HolidayError::Fetch(_))));
+        assert_eq!(store.lock().unwrap().holidays_between("2026-12-25", "2026-12-25").unwrap(), vec![holiday("2026-12-25", "Alt")]);
+    }
+
+    /// Speichert während des Abrufs einen Wechsel nach Bayern (wie ein Klick in den Einstellungen) und antwortet dann.
+    struct ApiOvertakenBySettings<'a> {
+        store: &'a Mutex<Store>,
+    }
+
+    impl HolidayApi for ApiOvertakenBySettings<'_> {
+        fn fetch(&self, _subdivision: &str, _from: &str, _to: &str) -> Result<String, HolidayError> {
+            crate::settings::change(&self.store.lock().unwrap(), date("2026-11-25"), "8:00", "40:00", "DE-BY").unwrap();
+            Ok(format!("[{CHRISTMAS}]"))
+        }
+    }
+
+    #[test]
+    fn refresh_does_not_store_holidays_fetched_for_an_outdated_subdivision() {
+        let (_dir, store) = open_temp();
+        let error = refresh(&store, &ApiOvertakenBySettings { store: &store }, date("2026-11-25")).unwrap_err();
+        assert_eq!(error.to_string(), "Feiertage konnten nicht aktualisiert werden.");
+        let store = store.lock().unwrap();
+        assert!(store.week_holidays("2026-12-21", "2026-12-27").unwrap().missing);
+        assert!(store.holidays_between("2026-12-25", "2026-12-25").unwrap().is_empty());
+    }
+
+    #[test]
+    fn load_week_does_not_store_holidays_fetched_for_an_outdated_subdivision() {
+        let (_dir, store) = open_temp();
+        let error = load_week(&store, &ApiOvertakenBySettings { store: &store }, "2026-12-23").unwrap_err();
+        assert_eq!(error.to_string(), "Feiertage für diese Woche konnten nicht geladen werden.");
+        assert!(store.lock().unwrap().week_holidays("2026-12-21", "2026-12-27").unwrap().missing);
+    }
+
+    #[test]
+    fn load_week_asks_with_the_subdivision_of_that_week() {
+        let (_dir, store) = open_temp();
+        bavaria_from(&store, "2027-01-04");
+        let api = ApiBySubdivision::new(vec![("DE-BY", format!("[{EPIPHANY}]"))]);
+        load_week(&store, &api, "2027-01-06").unwrap();
+        load_week(&store, &api, "2026-12-30").unwrap();
+        assert_eq!(
+            *api.asked.borrow(),
+            vec![
+                ("DE-BY".to_string(), "2027-01-04".to_string(), "2027-01-10".to_string()),
+                ("DE-NW".to_string(), "2026-12-28".to_string(), "2027-01-03".to_string()),
+            ]
+        );
+        assert_eq!(store.lock().unwrap().holidays_between("2027-01-06", "2027-01-06").unwrap(), vec![holiday("2027-01-06", "Heilige Drei Könige")]);
+    }
+
+    #[test]
+    #[ignore = "braucht Netz"]
+    fn live_refresh_for_bavaria_keeps_epiphany_and_drops_the_augsburg_peace_festival() {
+        let (_dir, store) = open_temp();
+        bavaria_from(&store, "0001-01-01");
+        load_week(&store, &OpenHolidays, "2027-01-06").unwrap();
+        load_week(&store, &OpenHolidays, "2026-08-08").unwrap();
+        let store = store.lock().unwrap();
+        assert_eq!(store.holidays_between("2027-01-04", "2027-01-10").unwrap(), vec![holiday("2027-01-06", "Heilige Drei Könige")]);
+        assert!(store.holidays_between("2026-08-03", "2026-08-09").unwrap().is_empty(), "Friedensfest gilt nur in Augsburg");
+        assert!(!store.week_holidays("2026-08-03", "2026-08-09").unwrap().missing);
     }
 
     #[test]

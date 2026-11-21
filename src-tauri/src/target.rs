@@ -476,10 +476,24 @@ mod tests {
         work(&store, 3, 8);
         let before = week_summary(&store, "2026-11-16").unwrap();
         freeze_past_weeks(&store, date("2026-11-25")).unwrap();
-        crate::settings::change(&store, date("2026-11-25"), "6:00", "30:00").unwrap();
+        crate::settings::change(&store, date("2026-11-25"), "6:00", "30:00", "DE-NW").unwrap();
         assert_eq!(week_summary(&store, "2026-11-16").unwrap(), before, "abgeschlossene Woche");
         assert_eq!(week_summary(&store, "2026-11-23").unwrap().target_minutes, 2400, "laufende Woche");
         assert_eq!(week_summary(&store, "2026-11-30").unwrap().target_minutes, 1800, "nächste Woche");
+    }
+
+    #[test]
+    fn weeks_on_both_sides_of_a_subdivision_change_are_frozen_with_their_own_holidays() {
+        let (_dir, mut store) = open_temp();
+        store.save_holidays("2026-11-02", "2026-11-29", &[holiday("2026-11-18")]).unwrap();
+        store.save_holidays("2026-11-30", "2027-01-24", &[holiday("2026-12-08")]).unwrap();
+        assert_eq!(store.loaded_ranges().unwrap().len(), 2, "aneinandergrenzende Abschnitte bleiben getrennt");
+        freeze_past_weeks(&store, date("2026-12-14")).unwrap();
+        assert_eq!(frozen(&store, "2026-11-16"), Some(1920));
+        assert_eq!(frozen(&store, "2026-11-23"), Some(2400), "letzte Woche vor dem Wechsel");
+        assert_eq!(frozen(&store, "2026-11-30"), Some(2400), "erste Woche nach dem Wechsel");
+        assert_eq!(frozen(&store, "2026-12-07"), Some(1920));
+        assert_eq!(frozen(&store, "2026-12-14"), None, "die Woche von heute");
     }
 
     #[test]

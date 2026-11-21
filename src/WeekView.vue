@@ -125,16 +125,22 @@ async function loadWeek() {
   loaded.value = true;
 }
 
-/** Holt beim Start die Feiertage vom Netz. Die Zeilen bleiben unberührt, nur die Markierung wird aufgefrischt. */
-async function refreshHolidays() {
+/** Ruft das Feiertagsfenster vom Netz ab; `true`, wenn neue Feiertage gespeichert wurden. */
+async function fetchHolidayWindow(): Promise<boolean> {
   try {
     await invoke("refresh_holidays");
   } catch (e) {
     holidayWarning.value = String(e);
-    return;
+    return false;
   }
+  holidayWarning.value = "";
   emit("holidaysChanged");
-  await reloadHolidays();
+  return true;
+}
+
+/** Holt beim Start die Feiertage vom Netz. Die Zeilen bleiben unberührt, nur die Markierung wird aufgefrischt. */
+async function refreshHolidays() {
+  if (await fetchHolidayWindow()) await reloadHolidays();
 }
 
 /** Knopf „Feiertage laden“: holt genau die angezeigte Woche. Ohne Netz bleibt die Warnung, es erscheint eine Meldung. */
@@ -155,10 +161,14 @@ async function loadMissingHolidays() {
   await reloadHolidays();
 }
 
-// Neue Einstellungen ändern Soll und die Anrechnung von Krank/Urlaub; Feiertage ändern sich dabei nicht.
+// Neue Einstellungen ändern Soll und die Anrechnung von Krank/Urlaub. Ein Wechsel des Bundeslands verwirft die
+// Feiertage ab dem Montag, ab dem er gilt; deshalb gleich neu abrufen. Neu gelesen wird auch ohne Netz.
 watch(
   () => props.settingsVersion,
-  () => reloadHolidays(),
+  async () => {
+    await fetchHolidayWindow();
+    await reloadHolidays();
+  },
 );
 
 function reportSaveFailure(date: string, message: string) {
