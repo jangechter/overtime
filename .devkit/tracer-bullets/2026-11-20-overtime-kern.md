@@ -27,12 +27,15 @@
 - Die App merkt sich, welche Zeiträume geladen wurden (eigene Tabelle in SQLite); sonst ist „keine Feiertage in dieser Woche“ nicht von „nie geladen“ zu unterscheiden.
 
 ## Open
-- Reihenfolge der Teile nach der Speicherung war nicht festgelegt; die Reihenfolge S3 bis S5 ist nur nach Risiko und Abhängigkeit sortiert (betrifft S3, S4, S5).
-- Grund für die Berechnung im Rust-Backend und Gründe gegen SwiftUI/Electron – nicht genannt (kein Slice betroffen).
+- Grund für die Berechnung im Rust-Backend und Gründe gegen SwiftUI/Electron – nicht genannt (kein Slice betroffen). Die Architektur ist umgesetzt; die Frage bleibt nur als fehlende Begründung offen.
+
+## Resolved (Stand 2026-11-21, Plan A vollständig umgesetzt)
+- Reihenfolge der Teile nach der Speicherung: gegenstandslos, Plan A ist in der Reihenfolge S1, S2, S3, S4a, S4b, S5a, S5b umgesetzt. Die Zeilen „Open: Reihenfolge nach der Speicherung“ in S3 bis S5 beziehen sich darauf.
+- Tauri-Voraussetzungen auf dem Mac: `cargo` und `rustc` sind eingerichtet, die App baut und läuft (`npm run build`, `cargo build`, `npm run tauri dev`).
 
 ## Not checked
-- Verfügbarkeit und Ausfallhistorie von OpenHolidays (nicht gemessen); ob die ODbL-Quellenangabe in der App an einer bestimmten Stelle stehen muss (nur FAQ gelesen, Lizenztext nicht).
-- Ob die Tauri-Voraussetzungen auf dem Mac vollständig sind (`cargo` und `rustc` fehlen laut Prüfung).
+- Verfügbarkeit und Ausfallhistorie von OpenHolidays (nicht gemessen).
+- ODbL-Quellenangabe: Die App nennt „Feiertage: OpenHolidays API (ODbL)“ als Fußzeile der Wochenübersicht. Ob die Lizenz eine bestimmte Stelle oder Form verlangt, ist offen (nur die FAQ gelesen, den Lizenztext nicht).
 
 ## S1: Wochenübersicht mit Eingabe und Tagesstunden
 - Goal: In einer Wochenübersicht trägt man pro Tag Start, Ende und Pause (Minuten) ein und sieht die Tagesstunden, berechnet im Rust-Backend.
