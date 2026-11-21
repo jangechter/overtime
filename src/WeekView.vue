@@ -29,6 +29,11 @@ const fetching = ref(new Set<string>());
 let latestRequest = 0;
 let latestSummaryRequest = 0;
 
+const emit = defineEmits<{
+  /** Gespeicherte Feiertage haben sich geändert (Abruf beim Start oder Knopf „Feiertage laden“). */
+  holidaysChanged: [];
+}>();
+
 const formatDate = (date: string) => new Date(`${date}T00:00:00`).toLocaleDateString("de-DE");
 const weekLabel = computed(() => `${formatDate(days.value[0])} – ${formatDate(days.value[6])}`);
 
@@ -71,6 +76,7 @@ async function reloadHolidays() {
     loadError.value = String(e);
     return;
   }
+  emit("holidaysChanged");
   await reloadSummary();
 }
 
@@ -163,15 +169,14 @@ onMounted(() => {
 </script>
 
 <template>
-  <main>
-    <h1>Overtime</h1>
-    <nav class="week-nav">
+  <section>
+    <nav class="week-nav" aria-label="Woche wählen">
       <button type="button" data-test="prev" @click="goToWeek(-1)">← Vorherige Woche</button>
       <span data-test="week-label">{{ weekLabel }}</span>
       <button type="button" data-test="today" @click="goToToday">Heute</button>
       <button type="button" data-test="next" @click="goToWeek(1)">Nächste Woche →</button>
     </nav>
-    <p v-if="loadError" class="error" data-test="load-error">{{ loadError }}</p>
+    <p v-if="loadError" class="error" role="alert" data-test="load-error">{{ loadError }}</p>
     <p v-if="saveError" class="error" data-test="save-error">{{ saveError }}</p>
     <p v-if="holidayWarning && holidayWarning !== loadError" class="warning" data-test="holiday-warning">{{ holidayWarning }}</p>
     <p v-if="holidaysMissing" class="warning" data-test="holidays-missing">
@@ -202,17 +207,14 @@ onMounted(() => {
         </p>
       </section>
     </template>
-    <footer class="source" data-test="holiday-source">Feiertage: OpenHolidays API (ODbL)</footer>
-  </main>
+  </section>
 </template>
 
 <style scoped>
-main { max-width: 56rem; margin: 0 auto; padding: 1rem; font-family: system-ui, sans-serif; }
 .week-nav { display: flex; align-items: center; justify-content: space-between; margin-bottom: 1rem; }
 .error { color: #b00020; }
 .warning { color: #8a5a00; }
 .summary { margin-top: 1rem; font-weight: 600; }
 .summary p { margin: 0.25rem 0; }
 .negative { color: #b00020; }
-.source { margin-top: 1rem; font-size: 0.8rem; color: #666; }
 </style>

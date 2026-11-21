@@ -1,5 +1,6 @@
 pub mod holidays;
 pub mod hours;
+pub mod month;
 pub mod store;
 pub mod target;
 pub mod week;
@@ -98,6 +99,13 @@ fn week_summary(state: tauri::State<AppStore>, date: String) -> Result<target::W
     target::week_summary(&store, target::DAILY_TARGET_MINUTES, &date).map_err(|e| e.to_string())
 }
 
+/// Monatssumme und Durchschnitt pro Arbeitstag des Monats, in dem `date` liegt.
+#[tauri::command]
+fn month_summary(state: tauri::State<AppStore>, date: String) -> Result<month::MonthSummary, String> {
+    let store = lock(&state)?;
+    month::month_summary(&store, target::DAILY_TARGET_MINUTES, &date).map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 fn load_holidays(state: tauri::State<AppStore>, from: String, to: String) -> Result<WeekHolidays, String> {
     let store = lock(&state)?;
@@ -142,7 +150,7 @@ pub fn run() {
             app.manage(AppStore(open_store(&dir.join("overtime.db"), chrono::Local::now().date_naive())));
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![save_entry, delete_entry, mark_absence, load_entries, week_summary, load_holidays, refresh_holidays, fetch_week_holidays])
+        .invoke_handler(tauri::generate_handler![save_entry, delete_entry, mark_absence, load_entries, week_summary, month_summary, load_holidays, refresh_holidays, fetch_week_holidays])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

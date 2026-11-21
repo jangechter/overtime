@@ -28,17 +28,19 @@
 ## Decided (2026-11-21, vor S1)
 - Abgleich mit dem Code nach Plan A (alle Slices `done`): `entries(date, start, end, break_minutes, minutes)` mit Schema-Version 2 (`PRAGMA user_version`), Soll abgeschlossener Wochen eingefroren in `week_targets`, Soll aktueller und künftiger Wochen live über `target::target_for(Tagessoll, Feiertage)`, Tagessoll `DAILY_TARGET_MINUTES` als Parameter. Feiertags-API ist OpenHolidays, die Lückenregel (Warnung und Knopf „Feiertage laden“) steht in Plan A unter „Decided“.
 - Krank/Urlaub wird live angerechnet: Gespeichert wird nur die Art des Tages (Spalte `kind`, Start/Ende/Pause leer). Die angerechneten Minuten (Tagessoll Montag bis Freitag, 0 an Feiertagen und am Wochenende) entstehen bei jedem Lesen aus den dann gespeicherten Feiertagen. Grund: Urlaub wird oft außerhalb des geladenen Feiertagsfensters eingetragen; fest gespeicherte 8 h zählten dann auch an einem später geladenen Feiertag (Saldo +8 h), und S4 kann das Tagessoll der jeweiligen Woche einrechnen. Bekannte Einschränkung: Korrigiert der Abruf beim Start einen Feiertag in einer der letzten zwei, schon eingefrorenen Wochen genau auf einem markierten Tag, ändert sich das Ist dieser Woche (das Soll bleibt eingefroren). Verworfen: Minuten beim Markieren speichern (wie S5a) und die Mischform mit Nachrechnen beim Laden von Feiertagen (zu aufwendig für den Nutzen).
+- Monatssumme und Durchschnitt (2026-11-21, vor S2): Die Monatssumme enthält alle Ist-Stunden des Kalendermonats, auch am Wochenende und an Feiertagen (wie die Wochensumme). Der Durchschnitt zählt nur die Ist-Stunden der Arbeitstage Montag bis Freitag ohne Feiertage mit Eintrag oder Markierung, geteilt durch deren Zahl, auf ganze Minuten gerundet. Weil Summe durch Tage dann nicht gleich dem Durchschnitt ist, zeigt die Ansicht die Zahl der gezählten Tage und, falls vorhanden, „davon … am Wochenende oder an Feiertagen“; beides kommt aus dem Backend. Verworfen: Monatssumme durch Arbeitstage teilen (Wochenendstunden verfälschen den Durchschnitt).
+- Monatsansicht (2026-11-21, vor S2): eigene Ansicht, oben umschaltbar mit „Woche | Monat“, ohne Router (Zustand im Hauptfenster). Sie blättert unabhängig von Monat zu Monat (mit „Heute“) und startet beim aktuellen Monat; die Wochenübersicht bleibt beim Umschalten erhalten. Grund: Eine Woche kann in zwei Monaten liegen, ein Abschnitt unter der Woche müsste einen Monat willkürlich wählen; S3 und S4 bekommen ihren Platz im selben Umschalter. Verworfen: Monatsabschnitt in der Wochenübersicht.
 
 ## Open
 - Grund für die Berechnung im Rust-Backend und Gründe gegen SwiftUI/Electron – nicht genannt (kein Slice betroffen).
 - Wochen-Soll und Tagessoll getrennt einstellbar (S4): Heute ist das Wochen-Soll `Tagessoll × (5 − Feiertage Mo–Fr)`. Bei getrennten Werten (z. B. 8 h und 32 h) ist offen, um wie viel ein Feiertag das Wochen-Soll senkt (betrifft S4).
 - Bundeslandwechsel (S4): Der Abruf beim Start ersetzt die gespeicherten Feiertage ab heute −14 Tage (Plan A S4a), die Tabelle `holidays` kennt kein Bundesland, und `DE-NW` steht fest in `holidays::request_url`. Nach einem Wechsel zeigten die letzten zwei abgeschlossenen Wochen die Feiertage des neuen Bundeslands (ihr Soll bleibt eingefroren). Widerspricht der Annahme „gespeicherte Feiertage des alten Bundeslands bleiben unverändert“ (betrifft S4).
-- Monatsansicht (S2): Es gibt noch keine Monatsansicht und keinen Router; offen, ob Stunden am Wochenende in die Monatssumme zählen, obwohl der Durchschnitt nur Montag bis Freitag zählt (betrifft S2).
 
 ## Resolved (2026-11-21)
 - „Wie Plan A S2 und S5 Datenmodell und Soll speichern“ – siehe „Decided“.
 - „Konkrete öffentliche Feiertags-API“ und „Feiertage bei Lücken von mehr als 2 Wochen“ – in Plan A entschieden (OpenHolidays; Warnung mit Knopf „Feiertage laden“, Soll wird bei fehlenden Feiertagen nicht gesenkt).
 - „Reihenfolge der Teile nach der Speicherung“ – Plan A ist vollständig, Plan B folgt der Reihenfolge S1 bis S4.
+- „Monatsansicht und Stunden am Wochenende in der Monatssumme“ (S2) – siehe „Decided“.
 
 ## Not checked
 - Ob die für den Speichern-Dialog nötige Tauri-Funktion im Projekt verfügbar ist: Stand 2026-11-21 ist weder ein Dialog- noch ein FS-Plugin eingebunden (`Cargo.toml`, `package.json`), die Capabilities enthalten nur `core:default` (betrifft S3).
@@ -60,11 +62,11 @@
 - Risk: 1 (Definition von Monat und Durchschnitt ist angenommen)
 - Demo: Für einen Monat mit mehreren eingetragenen Wochen (darunter ein Krank/Urlaub-Tag und ein Feiertag) die Monatsansicht öffnen; Summe und Durchschnitt entsprechen der von Hand gerechneten Erwartung. Eine Woche über die Monatsgrenze wird tageweise zugeordnet.
 - Tests: Rust-Tests für Monatssumme und Durchschnitt (leerer Monat, Monat mit Feiertag, Krank/Urlaub, Woche über Monatsgrenze, Schaltjahr-Februar); Vue-Test für die Anzeige.
-- Touches: src-tauri/src/target.rs (Ist über `day_entries` aus S1), src-tauri/src/lib.rs, src/WeekView.vue oder neue Monatsansicht
+- Touches: neues Modul src-tauri/src/month.rs (Ist über `target::day_entries` aus S1), src-tauri/src/lib.rs (Befehl), neue src/App.vue (Umschalter, Überschrift und Quellenangabe aus WeekView), neue src/MonthView.vue, neue src/month.ts, src/main.ts, src/WeekView.vue
 - Depends on: S1, Plan A S5
-- Open: none
-- Status: todo
-- Notes: none
+- Open: none (Summe, Durchschnitt und Ansicht entschieden, siehe „Decided“)
+- Status: done
+- Notes: Tests grün (Rust 146/146 plus 2 ignorierte Live-Tests, Vue 118/118, `npm run build` und `cargo build` ohne Fehler). Demo vom Nutzer im Fenster bestätigt. Neues Modul `month.rs` mit `month_of` und `month_summary(date)` (Ist, Durchschnitt, gezählte Tage, Stunden am Wochenende oder an Feiertagen, `holidaysMissing`), alles über `target::day_entries`, also mit derselben Anrechnung von Krank/Urlaub wie die Woche. Über den Plan hinaus: Liegt ein gezählter Tag in keinem geladenen Zeitraum, meldet das Backend `holidaysMissing` und die Ansicht weist darauf hin, dass ein Feiertag als Arbeitstag mitgezählt sein könnte (wie der Hinweis zum Soll der Woche). Neues `App.vue` mit Überschrift, Umschalter „Woche | Monat“ und Quellenangabe (aus `WeekView` verschoben); `WeekView` bleibt per `v-show` erhalten, `MonthView` per `KeepAlive` und liest den Monat bei jedem Öffnen neu (`onActivated`). Beim Blättern verschwinden die Zahlen, bis der neue Monat geladen ist. Aus dem Review: (1) Wurde beim ersten Start vor dem Ende des Feiertags-Abrufs auf „Monat“ geschaltet, blieben Hinweis und Durchschnitt veraltet; `WeekView` meldet jetzt `holidaysChanged`, `App` zählt `holidaysVersion` hoch, und eine geöffnete `MonthView` liest neu (ausgeblendet erst beim nächsten Öffnen). (2) Test für den Fehler einer überholten Anfrage und für das Ausblenden eines Ladefehlers ergänzt. (3) Die drei `nav` haben `aria-label`, Ladefehler `role="alert"`, die Monatszahlen `aria-live`.
 
 ## S3: CSV-Export
 - Goal: Alle gespeicherten Tage lassen sich als CSV-Datei exportieren.
@@ -86,4 +88,4 @@
 - Depends on: Plan A S4, Plan A S5
 - Open: Feiertag und getrennt eingestelltes Wochen-Soll; Feiertage des alten Bundeslands im Abruffenster (siehe „Open“)
 - Status: todo
-- Notes: Aus dem S1-Review: Krank/Urlaub wird live mit dem Tagessoll angerechnet (`target::day_entries`). Wird das Tagessoll einstellbar, muss jede Woche ihr gültiges Tagessoll bekommen, abgeschlossene Wochen das beim Einfrieren gültige (z. B. eigene Spalte in `week_targets`, von `day_entries` und `week_summary` statt des Parameters verwendet). Sonst ändert eine Änderung von 8 h auf 6 h das Ist aller vergangenen Wochen mit markierten Tagen rückwirkend.
+- Notes: Aus dem S1-Review: Krank/Urlaub wird live mit dem Tagessoll angerechnet (`target::day_entries`). Wird das Tagessoll einstellbar, muss jede Woche ihr gültiges Tagessoll bekommen, abgeschlossene Wochen das beim Einfrieren gültige (z. B. eigene Spalte in `week_targets`, von `day_entries`, `week_summary` und `month::month_summary` statt des Parameters verwendet; ein Monat kann Wochen mit verschiedenem Tagessoll enthalten). Sonst ändert eine Änderung von 8 h auf 6 h das Ist aller vergangenen Wochen mit markierten Tagen rückwirkend.

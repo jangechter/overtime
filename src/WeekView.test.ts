@@ -775,11 +775,5 @@ describe("WeekView", () => {
         expect(wrapper.find('[data-test="holidays-load-error"]').exists()).toBe(false);
       });
     });
-
-    it("nennt die Quelle der Feiertage", async () => {
-      const wrapper = mount(WeekView);
-      await flushPromises();
-      expect(wrapper.get('[data-test="holiday-source"]').text()).toContain("OpenHolidays API (ODbL)");
-    });
   });
 });

@@ -1,4 +1,4 @@
 import { createApp } from "vue";
-import WeekView from "./WeekView.vue";
+import App from "./App.vue";
 
-createApp(WeekView).mount("#app");
+createApp(App).mount("#app");
