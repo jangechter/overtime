@@ -1,3 +1,4 @@
+pub mod export;
 pub mod holidays;
 pub mod hours;
 pub mod month;
@@ -8,6 +9,7 @@ pub mod week;
 use std::sync::{Arc, Mutex};
 
 use tauri::Manager;
+use tauri_plugin_dialog::DialogExt;
 
 use holidays::OpenHolidays;
 use store::{Absence, Entry, Store, WeekHolidays};
@@ -141,16 +143,49 @@ async fn fetch_week_holidays(state: tauri::State<'_, AppStore>, date: String) ->
         })
 }
 
+/// Fragt im Speichern-Dialog nach dem Speicherort und schreibt alle gespeicherten Tage als CSV dorthin. Gibt den Pfad
+/// zurück oder `None`, wenn der Dialog abgebrochen wurde. Der Dialog blockiert und läuft deshalb in einem eigenen Thread.
+#[tauri::command]
+async fn export_csv(app: tauri::AppHandle, state: tauri::State<'_, AppStore>) -> Result<Option<String>, String> {
+    let store = state.0.as_ref().map(|opened| Arc::clone(&opened.store)).map_err(|message| message.clone())?;
+    let file_name = format!("overtime-{}.csv", chrono::Local::now().date_naive().format("%Y-%m-%d"));
+    let choose_path = move || {
+        let Some(chosen) = app
+            .dialog()
+            .file()
+            .set_title("Export speichern")
+            .set_file_name(file_name)
+            .add_filter("CSV", &["csv"])
+            .blocking_save_file()
+        else {
+            return Ok(None);
+        };
+        chosen.into_path().map(Some).map_err(|e| {
+            eprintln!("Speicherort nicht verwendbar: {e}");
+            export::ExportError::InvalidPath
+        })
+    };
+    tauri::async_runtime::spawn_blocking(move || export::export(&store, target::DAILY_TARGET_MINUTES, choose_path))
+        .await
+        .map_err(|e| {
+            eprintln!("CSV-Export abgebrochen: {e}");
+            "Der Export ist fehlgeschlagen. Bitte erneut versuchen.".to_string()
+        })?
+        .map(|path| path.map(|path| path.display().to_string()))
+        .map_err(|e| e.to_string())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&dir)?;
             app.manage(AppStore(open_store(&dir.join("overtime.db"), chrono::Local::now().date_naive())));
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![save_entry, delete_entry, mark_absence, load_entries, week_summary, month_summary, load_holidays, refresh_holidays, fetch_week_holidays])
+        .invoke_handler(tauri::generate_handler![save_entry, delete_entry, mark_absence, load_entries, week_summary, month_summary, load_holidays, refresh_holidays, fetch_week_holidays, export_csv])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

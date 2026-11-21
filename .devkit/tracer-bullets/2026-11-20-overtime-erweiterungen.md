@@ -41,9 +41,9 @@
 - „Konkrete öffentliche Feiertags-API“ und „Feiertage bei Lücken von mehr als 2 Wochen“ – in Plan A entschieden (OpenHolidays; Warnung mit Knopf „Feiertage laden“, Soll wird bei fehlenden Feiertagen nicht gesenkt).
 - „Reihenfolge der Teile nach der Speicherung“ – Plan A ist vollständig, Plan B folgt der Reihenfolge S1 bis S4.
 - „Monatsansicht und Stunden am Wochenende in der Monatssumme“ (S2) – siehe „Decided“.
+- „Ob die für den Speichern-Dialog nötige Tauri-Funktion im Projekt verfügbar ist“ (S3) – war nicht eingebunden; S3 bindet `tauri-plugin-dialog` 2.8 ein und öffnet den Dialog aus Rust (`blocking_save_file` in `spawn_blocking`), deshalb sind weder ein npm-Paket noch neue Capabilities nötig.
 
 ## Not checked
-- Ob die für den Speichern-Dialog nötige Tauri-Funktion im Projekt verfügbar ist: Stand 2026-11-21 ist weder ein Dialog- noch ein FS-Plugin eingebunden (`Cargo.toml`, `package.json`), die Capabilities enthalten nur `core:default` (betrifft S3).
 - Konditionen der Feiertags-APIs (keine Recherche durchgeführt).
 
 ## S1: Krank/Urlaub markieren
@@ -73,11 +73,11 @@
 - Risk: 3 (Speichern-Dialog und Dateizugriff aus Tauri im Projekt neu, zu prüfen)
 - Demo: In der App „Export" wählen, einen Speicherort im Dialog bestimmen; die Datei lässt sich in Excel öffnen und enthält pro Tag Datum, Start, Ende, Pause, Stunden und Art, auch für Krank/Urlaub.
 - Tests: Rust-Tests für die CSV-Erzeugung (Semikolon, UTF-8, Umlaute, leere Felder bei Krank/Urlaub, Reihenfolge nach Datum, leere Datenbank); Test, dass ein abgebrochener Dialog nichts schreibt.
-- Touches: src-tauri/src/store.rs, neues Modul für die CSV-Erzeugung, src-tauri/src/lib.rs, src-tauri/Cargo.toml und package.json (Dialog-Plugin), src-tauri/capabilities/default.json, src/WeekView.vue
+- Touches: neues Modul src-tauri/src/export.rs, src-tauri/src/lib.rs (Befehl, Plugin registrieren), src-tauri/Cargo.toml (`tauri-plugin-dialog`), src/App.vue (Knopf „Export (CSV)“)
 - Depends on: S1, Plan A S2
 - Open: none
-- Status: todo
-- Notes: none
+- Status: done
+- Notes: Tests grün (Rust 161/161 plus 2 ignorierte Live-Tests, Vue 123/123, `npm run build` und `cargo build` ohne Fehler). Mit dem echten Code aus einer Kopie der echten Datenbank exportiert: 13 Tage, BOM, CRLF, Kranktage mit leeren Zeiten. Demo vom Nutzer im Fenster bestätigt (Abbrechen ohne Datei, Export in Excel geöffnet). Format (Annahmen für deutsches Excel): UTF-8 mit BOM (ohne BOM liest Excel UTF-8 nicht), Zeilenende CRLF, Kopfzeile `Datum;Start;Ende;Pause (Min.);Stunden;Art`, Datum `TT.MM.JJJJ`, Stunden als Dezimalzahl mit Komma und zwei Nachkommastellen (kaufmännisch gerundet, 481 min → 8,02), damit Excel sie als Zahl summiert. Krank/Urlaub hat leere Start-, Ende- und Pausenfelder und die angerechneten Stunden (über `target::day_entries`, also 0,00 an Feiertagen und am Wochenende). Kein Anführungszeichen-Escaping: Alle Felder sind geprüfte Zeiten, Zahlen oder feste Wörter. Umlaute kommen in den Spalten nicht vor; der Test prüft, dass `write` UTF-8 unverändert schreibt. Der Dialog läuft im Backend (`export_csv`), die Oberfläche bekommt nur den Pfad oder `null` (abgebrochen) zurück; der Datenspeicher wird erst nach der Auswahl gesperrt. Vorgeschlagener Dateiname `overtime-JJJJ-MM-TT.csv`, Filter „CSV“ (NSSavePanel hängt `.csv` an, wenn der Nutzer die Endung entfernt). Aus dem Review: (1) Ein im Dialog gewählter Ort, der kein Dateipfad ist, galt still als abgebrochen; jetzt kommt „Der gewählte Speicherort kann nicht verwendet werden. Bitte einen anderen wählen.“ (auf dem Desktop praktisch nicht erreichbar). (2) Die Tests prüfen im Dialog-Callback, dass der Datenspeicher nicht gesperrt ist, und decken die vergiftete Sperre ab. (3) Geschrieben wird in `<Pfad>.tmp` und dann umbenannt, damit ein fehlgeschlagener Export einen vorhandenen früheren Export nicht zerstört. (4) `export::export` steht in der Notiz zu S4. Geprüft im Quelltext des Plugins: `blocking_save_file` baut das Panel per `run_on_main_thread` auf dem Main-Thread und wartet im Thread aus `spawn_blocking`; Rust-seitige Aufrufe brauchen keine Capability.
 
 ## S4: Soll und Bundesland einstellen
 - Goal: Tages-Soll, Wochen-Soll und Bundesland lassen sich einstellen; eine Änderung wirkt erst ab der nächsten Woche, vergangene Wochen bleiben unverändert.
@@ -88,4 +88,4 @@
 - Depends on: Plan A S4, Plan A S5
 - Open: Feiertag und getrennt eingestelltes Wochen-Soll; Feiertage des alten Bundeslands im Abruffenster (siehe „Open“)
 - Status: todo
-- Notes: Aus dem S1-Review: Krank/Urlaub wird live mit dem Tagessoll angerechnet (`target::day_entries`). Wird das Tagessoll einstellbar, muss jede Woche ihr gültiges Tagessoll bekommen, abgeschlossene Wochen das beim Einfrieren gültige (z. B. eigene Spalte in `week_targets`, von `day_entries`, `week_summary` und `month::month_summary` statt des Parameters verwendet; ein Monat kann Wochen mit verschiedenem Tagessoll enthalten). Sonst ändert eine Änderung von 8 h auf 6 h das Ist aller vergangenen Wochen mit markierten Tagen rückwirkend.
+- Notes: Aus dem S1-Review: Krank/Urlaub wird live mit dem Tagessoll angerechnet (`target::day_entries`). Wird das Tagessoll einstellbar, muss jede Woche ihr gültiges Tagessoll bekommen, abgeschlossene Wochen das beim Einfrieren gültige (z. B. eigene Spalte in `week_targets`, von `day_entries`, `week_summary`, `month::month_summary` und `export::export` statt des Parameters verwendet; ein Monat kann Wochen mit verschiedenem Tagessoll enthalten). Sonst ändert eine Änderung von 8 h auf 6 h das Ist aller vergangenen Wochen mit markierten Tagen rückwirkend.

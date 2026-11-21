@@ -6,6 +6,8 @@ import { currentMonth } from "./month";
 const calls: unknown[][] = [];
 /** Antwort auf `refresh_holidays`; in einem Test zurückgehalten, um den späten Abruf beim Start nachzustellen. */
 let refresh: () => Promise<unknown> = () => Promise.resolve(undefined);
+/** Antwort auf `export_csv`: gespeicherter Pfad, `null` bei abgebrochenem Dialog, oder ein Fehler. */
+let exportCsv: () => Promise<unknown> = () => Promise.resolve(null);
 /** Standardantworten: leere Woche ohne fehlende Feiertage, leerer Monat. */
 const answer = (command: unknown) => {
   if (command === "load_holidays") return { holidays: [], missing: false };
@@ -16,7 +18,9 @@ const answer = (command: unknown) => {
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: (...args: unknown[]) => {
     calls.push(args);
-    return args[0] === "refresh_holidays" ? refresh() : Promise.resolve(answer(args[0]));
+    if (args[0] === "refresh_holidays") return refresh();
+    if (args[0] === "export_csv") return exportCsv();
+    return Promise.resolve(answer(args[0]));
   },
 }));
 
@@ -28,6 +32,7 @@ describe("App", () => {
   beforeEach(() => {
     calls.length = 0;
     refresh = () => Promise.resolve(undefined);
+    exportCsv = () => Promise.resolve(null);
   });
 
   it("startet mit der Wochenübersicht und lädt den Monat noch nicht", async () => {
@@ -121,6 +126,67 @@ describe("App", () => {
     const labels = wrapper.findAll("nav").map((nav) => nav.attributes("aria-label"));
     expect(labels).toEqual(["Ansicht", "Woche wählen", "Monat wählen"]);
     wrapper.unmount();
+  });
+
+  describe("Export", () => {
+    it("exportiert per Knopf und nennt den gespeicherten Pfad", async () => {
+      exportCsv = () => Promise.resolve("/Users/jan/Documents/overtime-2026-11-21.csv");
+      const wrapper = mount(App);
+      await flushPromises();
+      await wrapper.get('[data-test="export"]').trigger("click");
+      await flushPromises();
+      expect(calls).toContainEqual(["export_csv"]);
+      expect(wrapper.get('[data-test="export-message"]').text()).toBe(
+        "Export gespeichert: /Users/jan/Documents/overtime-2026-11-21.csv",
+      );
+    });
+
+    it("zeigt nichts an, wenn der Speichern-Dialog abgebrochen wurde", async () => {
+      const wrapper = mount(App);
+      await flushPromises();
+      await wrapper.get('[data-test="export"]').trigger("click");
+      await flushPromises();
+      expect(wrapper.find('[data-test="export-message"]').exists()).toBe(false);
+      expect(wrapper.find('[data-test="export-error"]').exists()).toBe(false);
+    });
+
+    it("zeigt die Meldung des Backends, wenn die Datei nicht gespeichert werden kann", async () => {
+      exportCsv = () => Promise.reject("Die Datei konnte nicht gespeichert werden. Bitte einen anderen Speicherort wählen.");
+      const wrapper = mount(App);
+      await flushPromises();
+      await wrapper.get('[data-test="export"]').trigger("click");
+      await flushPromises();
+      expect(wrapper.get('[data-test="export-error"]').text()).toBe(
+        "Die Datei konnte nicht gespeichert werden. Bitte einen anderen Speicherort wählen.",
+      );
+    });
+
+    it("sperrt den Knopf, solange der Dialog offen ist, und exportiert nur einmal", async () => {
+      let finish: (path: string | null) => void = () => {};
+      exportCsv = () => new Promise((resolve) => (finish = resolve));
+      const wrapper = mount(App);
+      await flushPromises();
+      await wrapper.get('[data-test="export"]').trigger("click");
+      await wrapper.get('[data-test="export"]').trigger("click");
+      expect(wrapper.get('[data-test="export"]').attributes("disabled")).toBeDefined();
+      expect(count("export_csv")).toBe(1);
+      finish(null);
+      await flushPromises();
+      expect(wrapper.get('[data-test="export"]').attributes("disabled")).toBeUndefined();
+    });
+
+    it("blendet die Meldung des letzten Exports beim nächsten aus", async () => {
+      exportCsv = () => Promise.reject("Die Datei konnte nicht gespeichert werden. Bitte einen anderen Speicherort wählen.");
+      const wrapper = mount(App);
+      await flushPromises();
+      await wrapper.get('[data-test="export"]').trigger("click");
+      await flushPromises();
+      exportCsv = () => Promise.resolve("/tmp/overtime.csv");
+      await wrapper.get('[data-test="export"]').trigger("click");
+      await flushPromises();
+      expect(wrapper.find('[data-test="export-error"]').exists()).toBe(false);
+      expect(wrapper.get('[data-test="export-message"]').text()).toBe("Export gespeichert: /tmp/overtime.csv");
+    });
   });
 
   it("nennt die Quelle der Feiertage in beiden Ansichten", async () => {
