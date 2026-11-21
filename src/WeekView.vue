@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from "vue";
+import { computed, onMounted, ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import WeekRow, { type StoredEntry } from "./components/WeekRow.vue";
 import { currentWeek, formatBalance, formatHours, shiftWeek } from "./week";
@@ -28,6 +28,14 @@ const weekFetchError = ref("");
 const fetching = ref(new Set<string>());
 let latestRequest = 0;
 let latestSummaryRequest = 0;
+
+const props = withDefaults(
+  defineProps<{
+    /** Ändert sich, wenn Einstellungen gespeichert wurden; Soll und Krank/Urlaub der angezeigten Woche können sich ändern. */
+    settingsVersion?: number;
+  }>(),
+  { settingsVersion: 0 },
+);
 
 const emit = defineEmits<{
   /** Gespeicherte Feiertage haben sich geändert (Abruf beim Start oder Knopf „Feiertage laden“). */
@@ -76,7 +84,6 @@ async function reloadHolidays() {
     loadError.value = String(e);
     return;
   }
-  emit("holidaysChanged");
   await reloadSummary();
 }
 
@@ -126,6 +133,7 @@ async function refreshHolidays() {
     holidayWarning.value = String(e);
     return;
   }
+  emit("holidaysChanged");
   await reloadHolidays();
 }
 
@@ -143,8 +151,15 @@ async function loadMissingHolidays() {
   } finally {
     fetching.value.delete(weekStart);
   }
+  emit("holidaysChanged");
   await reloadHolidays();
 }
+
+// Neue Einstellungen ändern Soll und die Anrechnung von Krank/Urlaub; Feiertage ändern sich dabei nicht.
+watch(
+  () => props.settingsVersion,
+  () => reloadHolidays(),
+);
 
 function reportSaveFailure(date: string, message: string) {
   saveError.value = `Speichern für ${formatDate(date)} fehlgeschlagen: ${message}`;

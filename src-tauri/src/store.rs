@@ -7,6 +7,7 @@ use rusqlite::{Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
 use crate::hours::{worked_minutes, HoursError};
+use crate::settings::Settings;
 
 #[derive(Debug)]
 pub enum StoreError {
@@ -16,6 +17,8 @@ pub enum StoreError {
     InvalidLegacyEntry(String),
     /// Die Datenbank hat eine höhere Schema-Version, als diese App kennt.
     NewerSchema,
+    /// Der Einstellungshistorie fehlt der Starteintrag der Migration; ohne ihn rechnet keine Woche verlässlich.
+    MissingSettings,
     Db(rusqlite::Error),
 }
 
@@ -99,8 +102,8 @@ pub struct Store {
 
 /// Aktuelle Version des Datenbankschemas (`PRAGMA user_version`). 0 heißt: neue Datenbank oder Stand bis S4b ohne Version,
 /// 1: mit Spalte `minutes` (S5a), 2: mit Tabelle `week_targets` (S5b), 3: mit Spalte `kind` für Krank/Urlaub,
-/// Zeiten dann leer (Plan B S1).
-const SCHEMA_VERSION: i64 = 3;
+/// Zeiten dann leer (Plan B S1), 4: mit Tabelle `settings` für die Einstellungshistorie (Plan B S4a).
+const SCHEMA_VERSION: i64 = 4;
 
 impl Store {
     pub fn open(path: &Path) -> Result<Store, StoreError> {
@@ -223,6 +226,38 @@ impl Store {
         Ok(())
     }
 
+    /// Die Einstellungshistorie, nach „gilt ab“ sortiert. Enthält immer mindestens den Starteintrag der Migration.
+    pub fn settings_history(&self) -> Result<Vec<(String, Settings)>, StoreError> {
+        let mut statement = self.conn.prepare(
+            "SELECT valid_from, daily_minutes, weekly_minutes, subdivision FROM settings ORDER BY valid_from",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get(0)?,
+                Settings { daily_minutes: row.get(1)?, weekly_minutes: row.get(2)?, subdivision: row.get(3)? },
+            ))
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// Speichert Einstellungen, die ab `valid_from` gelten, und ersetzt einen Eintrag mit demselben Datum.
+    /// Ab wann sie gelten dürfen, entscheidet `settings::change`.
+    pub fn save_settings(&self, valid_from: &str, settings: &Settings) -> Result<(), StoreError> {
+        check_date(valid_from)?;
+        self.conn.execute(
+            "INSERT OR REPLACE INTO settings (valid_from, daily_minutes, weekly_minutes, subdivision) VALUES (?1, ?2, ?3, ?4)",
+            (valid_from, settings.daily_minutes, settings.weekly_minutes, &settings.subdivision),
+        )?;
+        Ok(())
+    }
+
+    /// Löscht die Einstellungen, die ab `valid_from` gelten würden (eine zurückgenommene, noch nicht wirksame Änderung).
+    pub fn delete_settings(&self, valid_from: &str) -> Result<(), StoreError> {
+        check_date(valid_from)?;
+        self.conn.execute("DELETE FROM settings WHERE valid_from = ?1", [valid_from])?;
+        Ok(())
+    }
+
     /// Feiertage von `from` bis `to` samt Angabe, ob der Zeitraum nie geladen wurde.
     pub fn week_holidays(&self, from: &str, to: &str) -> Result<WeekHolidays, StoreError> {
         Ok(WeekHolidays { holidays: self.holidays_between(from, to)?, missing: !self.is_loaded(from, to)? })
@@ -318,6 +353,23 @@ fn migrate(conn: &mut Connection) -> Result<(), StoreError> {
             ALTER TABLE entries_v3 RENAME TO entries;",
         )?;
     }
+    if version < 4 {
+        // Der Starteintrag gilt seit jeher und enthält die Werte, mit denen bis S4a gerechnet wurde; so rechnen alle
+        // bisherigen Wochen unverändert.
+        tx.execute_batch(
+            "CREATE TABLE settings (
+                valid_from TEXT PRIMARY KEY,
+                daily_minutes INTEGER NOT NULL CHECK (daily_minutes BETWEEN 1 AND 1440),
+                weekly_minutes INTEGER NOT NULL CHECK (weekly_minutes BETWEEN 1 AND 10080),
+                subdivision TEXT NOT NULL
+            );",
+        )?;
+        let start = Settings::default();
+        tx.execute(
+            "INSERT INTO settings (valid_from, daily_minutes, weekly_minutes, subdivision) VALUES (?1, ?2, ?3, ?4)",
+            (crate::settings::START, start.daily_minutes, start.weekly_minutes, &start.subdivision),
+        )?;
+    }
     tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     tx.commit()?;
     Ok(())
@@ -375,6 +427,9 @@ impl std::fmt::Display for StoreError {
             StoreError::NewerSchema => {
                 f.write_str("Die Datenbank stammt aus einer neueren Version der App und kann nicht geöffnet werden.")
             }
+            StoreError::MissingSettings => f.write_str(
+                "Die gespeicherten Einstellungen sind unvollständig, deshalb kann nicht gerechnet werden. Bitte die Datenbank prüfen.",
+            ),
             StoreError::Db(_) => f.write_str(
                 "Die Datenbank konnte nicht gelesen oder geschrieben werden. Bitte die App neu starten.",
             ),
@@ -721,7 +776,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("overtime.db");
         Store::open(&path).unwrap();
-        assert_eq!(schema_version(&path), 3);
+        assert_eq!(schema_version(&path), 4);
         assert!(has_minutes_column(&path));
     }
 
@@ -737,7 +792,7 @@ mod tests {
         );
         assert_eq!(store.holidays_between("2026-12-25", "2026-12-25").unwrap(), vec![holiday("2026-12-25", "1. Weihnachtsfeiertag")]);
         assert!(store.is_loaded("2026-12-01", "2027-02-01").unwrap());
-        assert_eq!(schema_version(&path), 3);
+        assert_eq!(schema_version(&path), 4);
     }
 
     #[test]
@@ -837,7 +892,7 @@ mod tests {
         assert_eq!(store.between("2026-11-16", "2026-11-16").unwrap()[0].minutes, 999, "Minuten werden nicht neu berechnet");
         store.freeze_week_target("2026-11-16", 1920).unwrap();
         assert_eq!(store.week_target("2026-11-16").unwrap(), Some(1920));
-        assert_eq!(schema_version(&path), 3);
+        assert_eq!(schema_version(&path), 4);
     }
 
     #[test]
@@ -937,7 +992,57 @@ mod tests {
         assert_eq!(store.holidays_between("2026-12-25", "2026-12-25").unwrap().len(), 1);
         assert!(store.is_loaded("2026-11-02", "2027-02-21").unwrap());
         store.save_absence("2026-11-17", Absence::Vacation).unwrap();
-        assert_eq!(schema_version(&path), 3);
+        assert_eq!(schema_version(&path), 4);
+    }
+
+    #[test]
+    fn a_fresh_database_starts_with_the_previous_settings_valid_since_ever() {
+        let (_dir, store) = open_temp();
+        assert_eq!(store.settings_history().unwrap(), vec![("0001-01-01".to_string(), Settings::default())]);
+        assert_eq!(
+            Settings::default(),
+            Settings { daily_minutes: 480, weekly_minutes: 2400, subdivision: "DE-NW".to_string() }
+        );
+    }
+
+    #[test]
+    fn database_in_the_s1_schema_gets_the_settings_table_and_keeps_its_data() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("overtime.db");
+        Store::open(&path).unwrap().save_absence("2026-11-16", Absence::Sick).unwrap();
+        raw(&path).execute_batch("DROP TABLE settings; PRAGMA user_version = 3;").unwrap();
+        let store = Store::open(&path).unwrap();
+        assert_eq!(store.settings_history().unwrap(), vec![("0001-01-01".to_string(), Settings::default())]);
+        assert_eq!(store.between("2026-11-16", "2026-11-16").unwrap(), vec![absence("2026-11-16", Kind::Sick)]);
+        assert_eq!(schema_version(&path), 4);
+    }
+
+    #[test]
+    fn saved_settings_are_listed_by_start_and_replace_those_with_the_same_start() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("overtime.db");
+        let store = Store::open(&path).unwrap();
+        let part_time = Settings { daily_minutes: 360, weekly_minutes: 1800, subdivision: "DE-NW".into() };
+        let four_days = Settings { daily_minutes: 480, weekly_minutes: 1920, subdivision: "DE-NW".into() };
+        store.save_settings("2026-11-30", &part_time).unwrap();
+        store.save_settings("2026-11-30", &four_days).unwrap();
+        assert_eq!(
+            Store::open(&path).unwrap().settings_history().unwrap(),
+            vec![("0001-01-01".to_string(), Settings::default()), ("2026-11-30".to_string(), four_days)]
+        );
+        store.delete_settings("2026-11-30").unwrap();
+        assert_eq!(store.settings_history().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn the_database_rejects_settings_outside_the_allowed_range() {
+        let (_dir, store) = open_temp();
+        for (daily, weekly) in [(0, 2400), (1441, 2400), (480, 0), (480, 10081)] {
+            let settings = Settings { daily_minutes: daily, weekly_minutes: weekly, subdivision: "DE-NW".into() };
+            let error = store.save_settings("2026-11-30", &settings).unwrap_err().to_string();
+            assert_eq!(error, "Die Datenbank konnte nicht gelesen oder geschrieben werden. Bitte die App neu starten.");
+        }
+        assert!(matches!(store.save_settings("morgen", &Settings::default()), Err(StoreError::InvalidDate)));
     }
 
     #[test]

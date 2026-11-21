@@ -2,6 +2,7 @@ pub mod export;
 pub mod holidays;
 pub mod hours;
 pub mod month;
+pub mod settings;
 pub mod store;
 pub mod target;
 pub mod week;
@@ -44,7 +45,7 @@ fn open_store(path: &std::path::Path, today: chrono::NaiveDate) -> Result<Opened
         eprintln!("Datenbank konnte nicht geöffnet werden: {e:?}");
         e.to_string()
     })?;
-    let frozen = match target::freeze_past_weeks(&store, target::DAILY_TARGET_MINUTES, today) {
+    let frozen = match target::freeze_past_weeks(&store, today) {
         Ok(()) => true,
         Err(e) => {
             eprintln!("Soll abgeschlossener Wochen konnte nicht eingefroren werden: {e:?}");
@@ -84,28 +85,42 @@ fn delete_entry(state: tauri::State<AppStore>, date: String) -> Result<(), Strin
 #[tauri::command]
 fn mark_absence(state: tauri::State<AppStore>, date: String, kind: Absence) -> Result<u32, String> {
     let store = lock(&state)?;
-    target::mark_absence(&store, target::DAILY_TARGET_MINUTES, &date, kind).map_err(|e| e.to_string())
+    target::mark_absence(&store, &date, kind).map_err(|e| e.to_string())
 }
 
 /// Einträge von `from` bis `to`; Krank/Urlaub mit den angerechneten Minuten.
 #[tauri::command]
 fn load_entries(state: tauri::State<AppStore>, from: String, to: String) -> Result<Vec<Entry>, String> {
     let store = lock(&state)?;
-    target::day_entries(&store, target::DAILY_TARGET_MINUTES, &from, &to).map_err(|e| e.to_string())
+    target::day_entries(&store, &from, &to).map_err(|e| e.to_string())
 }
 
 /// Ist, Soll und Saldo der Woche, in der `date` liegt.
 #[tauri::command]
 fn week_summary(state: tauri::State<AppStore>, date: String) -> Result<target::WeekSummary, String> {
     let store = lock(&state)?;
-    target::week_summary(&store, target::DAILY_TARGET_MINUTES, &date).map_err(|e| e.to_string())
+    target::week_summary(&store, &date).map_err(|e| e.to_string())
 }
 
 /// Monatssumme und Durchschnitt pro Arbeitstag des Monats, in dem `date` liegt.
 #[tauri::command]
 fn month_summary(state: tauri::State<AppStore>, date: String) -> Result<month::MonthSummary, String> {
     let store = lock(&state)?;
-    month::month_summary(&store, target::DAILY_TARGET_MINUTES, &date).map_err(|e| e.to_string())
+    month::month_summary(&store, &date).map_err(|e| e.to_string())
+}
+
+/// Die Einstellungen der laufenden Woche und eine noch nicht wirksame Änderung.
+#[tauri::command]
+fn load_settings(state: tauri::State<AppStore>) -> Result<settings::Overview, String> {
+    let store = lock(&state)?;
+    settings::overview(&store, chrono::Local::now().date_naive()).map_err(|e| e.to_string())
+}
+
+/// Speichert Tagessoll und Wochen-Soll (`H:MM`), gültig ab dem Montag der nächsten Woche.
+#[tauri::command]
+fn save_settings(state: tauri::State<AppStore>, daily: String, weekly: String) -> Result<settings::Overview, String> {
+    let store = lock(&state)?;
+    settings::change(&store, chrono::Local::now().date_naive(), &daily, &weekly).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -165,7 +180,7 @@ async fn export_csv(app: tauri::AppHandle, state: tauri::State<'_, AppStore>) ->
             export::ExportError::InvalidPath
         })
     };
-    tauri::async_runtime::spawn_blocking(move || export::export(&store, target::DAILY_TARGET_MINUTES, choose_path))
+    tauri::async_runtime::spawn_blocking(move || export::export(&store, choose_path))
         .await
         .map_err(|e| {
             eprintln!("CSV-Export abgebrochen: {e}");
@@ -185,7 +200,7 @@ pub fn run() {
             app.manage(AppStore(open_store(&dir.join("overtime.db"), chrono::Local::now().date_naive())));
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![save_entry, delete_entry, mark_absence, load_entries, week_summary, month_summary, load_holidays, refresh_holidays, fetch_week_holidays, export_csv])
+        .invoke_handler(tauri::generate_handler![save_entry, delete_entry, mark_absence, load_entries, week_summary, month_summary, load_settings, save_settings, load_holidays, refresh_holidays, fetch_week_holidays, export_csv])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
@@ -276,7 +291,7 @@ mod tests {
         let store = shared.lock().unwrap();
         assert!(store.holidays_between("2026-11-18", "2026-11-18").unwrap().is_empty(), "der Abruf hat die Feiertage ersetzt");
         assert_eq!(store.week_target("2026-11-16").unwrap(), Some(1920));
-        let summary = target::week_summary(&store, target::DAILY_TARGET_MINUTES, "2026-11-16").unwrap();
+        let summary = target::week_summary(&store, "2026-11-16").unwrap();
         assert_eq!(summary.target_minutes, 1920);
     }
 

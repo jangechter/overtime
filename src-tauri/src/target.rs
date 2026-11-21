@@ -3,12 +3,9 @@
 use chrono::{Datelike, Days, NaiveDate};
 use serde::Serialize;
 
+use crate::settings::History;
 use crate::store::{Absence, Entry, Holiday, Kind, Store, StoreError};
 use crate::week::{format_date, monday_of, week_of};
-
-/// Tagessoll Montag bis Freitag in Minuten (8 h). Wird als Parameter durchgereicht, damit die Einstellungen
-/// aus Plan B es später ersetzen können.
-pub const DAILY_TARGET_MINUTES: u32 = 480;
 
 /// Ist, Soll und Saldo einer Woche in Minuten. `target_incomplete`: Für die Woche wurden keine Feiertage
 /// geladen, das Soll ist deshalb nicht um Feiertage gesenkt.
@@ -21,13 +18,14 @@ pub struct WeekSummary {
     pub target_incomplete: bool,
 }
 
-/// Soll einer Woche mit den gegebenen Feiertagen: fünf Tagessolle, je Feiertag Montag bis Freitag eines weniger.
-pub fn target_for(daily_minutes: u32, holidays: &[Holiday]) -> u32 {
+/// Soll einer Woche mit den gegebenen Feiertagen: das Wochen-Soll, je Feiertag Montag bis Freitag ein Tagessoll
+/// weniger, mindestens 0. So wirken ein Feiertag und ein Urlaubstag gleich auf den Saldo.
+pub fn target_for(daily_minutes: u32, weekly_minutes: u32, holidays: &[Holiday]) -> u32 {
     let weekday_holidays = holidays
         .iter()
         .filter(|holiday| parse(&holiday.date).is_some_and(|day| day.weekday().number_from_monday() <= 5))
         .count() as u32;
-    daily_minutes * 5u32.saturating_sub(weekday_holidays)
+    weekly_minutes.saturating_sub(daily_minutes.saturating_mul(weekday_holidays))
 }
 
 fn parse(date: &str) -> Option<NaiveDate> {
@@ -47,34 +45,39 @@ pub fn absence_minutes(daily_minutes: u32, date: &str, holidays: &[Holiday]) -> 
 }
 
 /// Einträge von `from` bis `to` mit den Minuten, die ins Ist zählen. Krank/Urlaub wird bei jedem Aufruf mit den dann
-/// gespeicherten Feiertagen angerechnet, damit im Voraus eingetragener Urlaub nach dem Laden der Feiertage stimmt.
-pub fn day_entries(store: &Store, daily_minutes: u32, from: &str, to: &str) -> Result<Vec<Entry>, StoreError> {
+/// gespeicherten Feiertagen und dem Tagessoll seiner Woche angerechnet, damit im Voraus eingetragener Urlaub nach dem
+/// Laden der Feiertage stimmt und eine Änderung des Tagessolls vergangene Wochen nicht berührt.
+pub fn day_entries(store: &Store, from: &str, to: &str) -> Result<Vec<Entry>, StoreError> {
     let mut entries = store.between(from, to)?;
     let holidays = store.holidays_between(from, to)?;
+    let history = History::load(store)?;
     for entry in entries.iter_mut().filter(|entry| entry.kind != Kind::Work) {
-        entry.minutes = absence_minutes(daily_minutes, &entry.date, &holidays);
+        entry.minutes = absence_minutes(history.at(&entry.date).daily_minutes, &entry.date, &holidays);
     }
     Ok(entries)
 }
 
 /// Markiert `date` als krank oder Urlaub (ersetzt einen Eintrag) und gibt die angerechneten Minuten zurück.
-pub fn mark_absence(store: &Store, daily_minutes: u32, date: &str, absence: Absence) -> Result<u32, StoreError> {
+pub fn mark_absence(store: &Store, date: &str, absence: Absence) -> Result<u32, StoreError> {
     store.save_absence(date, absence)?;
+    let daily_minutes = History::load(store)?.at(date).daily_minutes;
     Ok(absence_minutes(daily_minutes, date, &store.holidays_between(date, date)?))
 }
 
-/// Ist, Soll und Saldo der Woche, in der `date` liegt. Ein eingefrorenes Soll hat Vorrang vor der Berechnung.
-pub fn week_summary(store: &Store, daily_minutes: u32, date: &str) -> Result<WeekSummary, StoreError> {
+/// Ist, Soll und Saldo der Woche, in der `date` liegt. Ein eingefrorenes Soll hat Vorrang vor der Berechnung,
+/// sonst gelten Tages- und Wochen-Soll dieser Woche.
+pub fn week_summary(store: &Store, date: &str) -> Result<WeekSummary, StoreError> {
     let (from, to) = week_of(date)?;
-    let actual_minutes = day_entries(store, daily_minutes, &from, &to)?.iter().map(|entry| entry.minutes).sum();
+    let actual_minutes = day_entries(store, &from, &to)?.iter().map(|entry| entry.minutes).sum();
+    let settings = History::load(store)?.at(&from);
     let (target_minutes, target_incomplete) = match store.week_target(&from)? {
         Some(frozen) => (frozen, false),
         None => {
             let week = store.week_holidays(&from, &to)?;
             if week.missing {
-                (target_for(daily_minutes, &[]), true)
+                (settings.weekly_minutes, true)
             } else {
-                (target_for(daily_minutes, &week.holidays), false)
+                (target_for(settings.daily_minutes, settings.weekly_minutes, &week.holidays), false)
             }
         }
     };
@@ -83,16 +86,18 @@ pub fn week_summary(store: &Store, daily_minutes: u32, date: &str) -> Result<Wee
 }
 
 /// Friert das Soll aller abgeschlossenen Wochen ein, für die Feiertage geladen wurden und noch kein Soll
-/// gespeichert ist. Ein gespeichertes Soll wird nie überschrieben.
-pub fn freeze_past_weeks(store: &Store, daily_minutes: u32, today: NaiveDate) -> Result<(), StoreError> {
+/// gespeichert ist, jeweils mit den Einstellungen dieser Woche. Ein gespeichertes Soll wird nie überschrieben.
+pub fn freeze_past_weeks(store: &Store, today: NaiveDate) -> Result<(), StoreError> {
     let current_monday = monday_of(today);
+    let history = History::load(store)?;
     for (from, to) in store.loaded_ranges()? {
         let (Some(from), Some(to)) = (parse(&from), parse(&to)) else { continue };
         let mut monday = if monday_of(from) == from { from } else { monday_of(from) + Days::new(7) };
         while monday < current_monday && monday + Days::new(6) <= to {
             let (start, end) = (format_date(monday), format_date(monday + Days::new(6)));
             let holidays = store.holidays_between(&start, &end)?;
-            store.freeze_week_target(&start, target_for(daily_minutes, &holidays))?;
+            let settings = history.at(&start);
+            store.freeze_week_target(&start, target_for(settings.daily_minutes, settings.weekly_minutes, &holidays))?;
             monday = monday + Days::new(7);
         }
     }
@@ -103,7 +108,15 @@ pub fn freeze_past_weeks(store: &Store, daily_minutes: u32, today: NaiveDate) ->
 mod tests {
     use super::*;
 
-    const DAY: u32 = DAILY_TARGET_MINUTES;
+    use crate::settings::Settings;
+
+    /// Startwerte der Einstellungen: 8 h am Tag, 40 h in der Woche.
+    const DAY: u32 = 480;
+    const WEEK: u32 = 2400;
+
+    fn settings(daily_minutes: u32, weekly_minutes: u32) -> Settings {
+        Settings { daily_minutes, weekly_minutes, subdivision: "DE-NW".into() }
+    }
 
     fn holiday(date: &str) -> Holiday {
         Holiday { date: date.into(), name: "Feiertag".into() }
@@ -131,29 +144,42 @@ mod tests {
 
     #[test]
     fn target_without_holidays_is_five_daily_targets() {
-        assert_eq!(target_for(DAY, &[]), 2400);
+        assert_eq!(target_for(DAY, WEEK, &[]), 2400);
     }
 
     #[test]
     fn each_weekday_holiday_lowers_the_target_by_one_daily_target() {
-        assert_eq!(target_for(DAY, &[holiday("2026-12-25")]), 1920);
-        assert_eq!(target_for(DAY, &[holiday("2026-12-24"), holiday("2026-12-25")]), 1440);
+        assert_eq!(target_for(DAY, WEEK, &[holiday("2026-12-25")]), 1920);
+        assert_eq!(target_for(DAY, WEEK, &[holiday("2026-12-24"), holiday("2026-12-25")]), 1440);
     }
 
     #[test]
     fn holidays_on_monday_and_friday_count_like_the_days_between() {
-        assert_eq!(target_for(DAY, &[holiday("2026-12-21"), holiday("2026-12-25")]), 1440);
+        assert_eq!(target_for(DAY, WEEK, &[holiday("2026-12-21"), holiday("2026-12-25")]), 1440);
     }
 
     #[test]
     fn holiday_on_a_weekend_does_not_lower_the_target() {
-        assert_eq!(target_for(DAY, &[holiday("2026-12-26"), holiday("2026-12-27")]), 2400);
+        assert_eq!(target_for(DAY, WEEK, &[holiday("2026-12-26"), holiday("2026-12-27")]), 2400);
     }
 
     #[test]
     fn target_uses_the_given_daily_target() {
-        assert_eq!(target_for(360, &[]), 1800);
-        assert_eq!(target_for(360, &[holiday("2026-12-25")]), 1440);
+        assert_eq!(target_for(360, 1800, &[]), 1800);
+        assert_eq!(target_for(360, 1800, &[holiday("2026-12-25")]), 1440);
+    }
+
+    #[test]
+    fn a_separate_weekly_target_is_lowered_by_one_daily_target_per_holiday() {
+        assert_eq!(target_for(480, 1920, &[]), 1920);
+        assert_eq!(target_for(480, 1920, &[holiday("2026-12-25")]), 1440);
+        assert_eq!(target_for(480, 1920, &[holiday("2026-12-26")]), 1920, "Samstag");
+    }
+
+    #[test]
+    fn the_target_never_drops_below_zero() {
+        let three = [holiday("2026-12-23"), holiday("2026-12-24"), holiday("2026-12-25")];
+        assert_eq!(target_for(480, 960, &three), 0);
     }
 
     // --- week_summary ---
@@ -163,7 +189,7 @@ mod tests {
         let (_dir, mut store) = open_temp();
         store.save_holidays("2026-11-02", "2026-11-29", &[holiday("2026-11-20")]).unwrap();
         work(&store, 4, 8);
-        let summary = week_summary(&store, DAY, "2026-11-18").unwrap();
+        let summary = week_summary(&store, "2026-11-18").unwrap();
         assert_eq!(
             summary,
             WeekSummary { actual_minutes: 1920, target_minutes: 1920, balance_minutes: 0, target_incomplete: false }
@@ -177,7 +203,7 @@ mod tests {
         for (offset, hours) in [9, 9, 9, 9, 9].iter().enumerate() {
             store.save(&format!("2026-11-{}", 16 + offset), "06:00", &format!("{:02}:00", 6 + hours), 0.0).unwrap();
         }
-        let summary = week_summary(&store, DAY, "2026-11-16").unwrap();
+        let summary = week_summary(&store, "2026-11-16").unwrap();
         assert_eq!((summary.actual_minutes, summary.target_minutes, summary.balance_minutes), (2700, 2400, 300));
     }
 
@@ -186,7 +212,7 @@ mod tests {
         let (_dir, mut store) = open_temp();
         store.save_holidays("2026-11-02", "2026-11-29", &[]).unwrap();
         work(&store, 5, 7);
-        let summary = week_summary(&store, DAY, "2026-11-22").unwrap();
+        let summary = week_summary(&store, "2026-11-22").unwrap();
         assert_eq!((summary.actual_minutes, summary.target_minutes, summary.balance_minutes), (2100, 2400, -300));
     }
 
@@ -194,14 +220,14 @@ mod tests {
     fn week_without_entries_has_the_full_target_as_negative_balance() {
         let (_dir, mut store) = open_temp();
         store.save_holidays("2026-11-02", "2026-11-29", &[]).unwrap();
-        let summary = week_summary(&store, DAY, "2026-11-16").unwrap();
+        let summary = week_summary(&store, "2026-11-16").unwrap();
         assert_eq!((summary.actual_minutes, summary.balance_minutes), (0, -2400));
     }
 
     #[test]
     fn week_without_loaded_holidays_keeps_the_full_target_and_is_marked_incomplete() {
         let (_dir, store) = open_temp();
-        let summary = week_summary(&store, DAY, "2027-03-02").unwrap();
+        let summary = week_summary(&store, "2027-03-02").unwrap();
         assert_eq!(
             summary,
             WeekSummary { actual_minutes: 0, target_minutes: 2400, balance_minutes: -2400, target_incomplete: true }
@@ -212,22 +238,22 @@ mod tests {
     fn loaded_week_without_holidays_is_not_marked_incomplete() {
         let (_dir, mut store) = open_temp();
         store.save_holidays("2026-11-02", "2026-11-29", &[]).unwrap();
-        assert!(!week_summary(&store, DAY, "2026-11-16").unwrap().target_incomplete);
+        assert!(!week_summary(&store, "2026-11-16").unwrap().target_incomplete);
     }
 
     #[test]
     fn summary_rejects_a_malformed_date() {
         let (_dir, store) = open_temp();
-        assert!(matches!(week_summary(&store, DAY, "morgen"), Err(StoreError::InvalidDate)));
+        assert!(matches!(week_summary(&store, "morgen"), Err(StoreError::InvalidDate)));
     }
 
     #[test]
     fn frozen_target_wins_over_the_current_holidays() {
         let (_dir, mut store) = open_temp();
         store.save_holidays("2026-11-02", "2026-11-29", &[holiday("2026-11-18")]).unwrap();
-        freeze_past_weeks(&store, DAY, date("2026-11-30")).unwrap();
+        freeze_past_weeks(&store, date("2026-11-30")).unwrap();
         store.save_holidays("2026-11-02", "2026-11-29", &[]).unwrap();
-        let summary = week_summary(&store, DAY, "2026-11-16").unwrap();
+        let summary = week_summary(&store, "2026-11-16").unwrap();
         assert_eq!(summary.target_minutes, 1920);
         assert!(!summary.target_incomplete);
     }
@@ -235,7 +261,7 @@ mod tests {
     #[test]
     fn actual_is_zero_without_entries() {
         let (_dir, store) = open_temp();
-        assert_eq!(week_summary(&store, DAY, "2026-11-16").unwrap().actual_minutes, 0);
+        assert_eq!(week_summary(&store, "2026-11-16").unwrap().actual_minutes, 0);
     }
 
     #[test]
@@ -246,7 +272,7 @@ mod tests {
         store.save("2026-11-18", "09:00", "12:15", 0.0).unwrap();
         store.save("2026-11-22", "10:00", "11:00", 0.0).unwrap();
         store.save("2026-11-23", "08:00", "12:00", 0.0).unwrap();
-        assert_eq!(week_summary(&store, DAY, "2026-11-18").unwrap().actual_minutes, 480 + 195 + 60);
+        assert_eq!(week_summary(&store, "2026-11-18").unwrap().actual_minutes, 480 + 195 + 60);
     }
 
     #[test]
@@ -255,9 +281,9 @@ mod tests {
         store.save("2026-11-16", "08:00", "16:30", 30.0).unwrap();
         store.save("2026-11-17", "08:00", "12:00", 0.0).unwrap();
         store.save("2026-11-16", "08:00", "10:00", 0.0).unwrap();
-        assert_eq!(week_summary(&store, DAY, "2026-11-16").unwrap().actual_minutes, 120 + 240);
+        assert_eq!(week_summary(&store, "2026-11-16").unwrap().actual_minutes, 120 + 240);
         store.delete("2026-11-17").unwrap();
-        assert_eq!(week_summary(&store, DAY, "2026-11-16").unwrap().actual_minutes, 120);
+        assert_eq!(week_summary(&store, "2026-11-16").unwrap().actual_minutes, 120);
     }
 
     #[test]
@@ -266,7 +292,7 @@ mod tests {
         for date in ["2026-12-27", "2026-12-28", "2027-01-01", "2027-01-03", "2027-01-04"] {
             store.save(date, "08:00", "12:00", 0.0).unwrap();
         }
-        assert_eq!(week_summary(&store, DAY, "2027-01-01").unwrap().actual_minutes, 3 * 240);
+        assert_eq!(week_summary(&store, "2027-01-01").unwrap().actual_minutes, 3 * 240);
     }
 
     #[test]
@@ -277,7 +303,7 @@ mod tests {
             .unwrap()
             .execute("UPDATE entries SET minutes = 123 WHERE date = '2026-11-16'", [])
             .unwrap();
-        assert_eq!(week_summary(&store, DAY, "2026-11-16").unwrap().actual_minutes, 123);
+        assert_eq!(week_summary(&store, "2026-11-16").unwrap().actual_minutes, 123);
     }
 
     // --- Krank/Urlaub ---
@@ -311,7 +337,7 @@ mod tests {
             store.save(date, "08:00", "16:30", 30.0).unwrap();
         }
         assert_eq!(
-            week_summary(&store, DAY, "2026-11-16").unwrap(),
+            week_summary(&store, "2026-11-16").unwrap(),
             WeekSummary { actual_minutes: 2400, target_minutes: 2400, balance_minutes: 0, target_incomplete: false }
         );
     }
@@ -321,9 +347,9 @@ mod tests {
         let (_dir, mut store) = open_temp();
         store.save_holidays("2026-11-02", "2026-11-29", &[]).unwrap();
         store.save_absence("2026-11-16", Absence::Vacation).unwrap();
-        assert_eq!(week_summary(&store, DAY, "2026-11-16").unwrap().actual_minutes, 480);
+        assert_eq!(week_summary(&store, "2026-11-16").unwrap().actual_minutes, 480);
         store.delete("2026-11-16").unwrap();
-        let summary = week_summary(&store, DAY, "2026-11-16").unwrap();
+        let summary = week_summary(&store, "2026-11-16").unwrap();
         assert_eq!((summary.actual_minutes, summary.target_minutes, summary.balance_minutes), (0, 2400, -2400));
     }
 
@@ -331,9 +357,9 @@ mod tests {
     fn a_marked_holiday_changes_neither_actual_nor_target() {
         let (_dir, mut store) = open_temp();
         store.save_holidays("2026-12-21", "2026-12-27", &[holiday("2026-12-25")]).unwrap();
-        let before = week_summary(&store, DAY, "2026-12-21").unwrap();
+        let before = week_summary(&store, "2026-12-21").unwrap();
         store.save_absence("2026-12-25", Absence::Vacation).unwrap();
-        assert_eq!(week_summary(&store, DAY, "2026-12-21").unwrap(), before);
+        assert_eq!(week_summary(&store, "2026-12-21").unwrap(), before);
         assert_eq!(before.target_minutes, 1920);
     }
 
@@ -343,7 +369,7 @@ mod tests {
         store.save_holidays("2026-11-02", "2026-11-29", &[]).unwrap();
         store.save_absence("2026-11-21", Absence::Sick).unwrap();
         store.save_absence("2026-11-22", Absence::Vacation).unwrap();
-        let summary = week_summary(&store, DAY, "2026-11-16").unwrap();
+        let summary = week_summary(&store, "2026-11-16").unwrap();
         assert_eq!((summary.actual_minutes, summary.target_minutes), (0, 2400));
     }
 
@@ -353,14 +379,14 @@ mod tests {
         for date in ["2027-03-29", "2027-03-30", "2027-03-31", "2027-04-01", "2027-04-02"] {
             store.save_absence(date, Absence::Vacation).unwrap();
         }
-        let before = week_summary(&store, DAY, "2027-03-29").unwrap();
+        let before = week_summary(&store, "2027-03-29").unwrap();
         assert_eq!(
             before,
             WeekSummary { actual_minutes: 2400, target_minutes: 2400, balance_minutes: 0, target_incomplete: true }
         );
         store.save_holidays("2027-03-29", "2027-04-04", &[holiday("2027-03-29"), holiday("2027-04-02")]).unwrap();
         assert_eq!(
-            week_summary(&store, DAY, "2027-03-29").unwrap(),
+            week_summary(&store, "2027-03-29").unwrap(),
             WeekSummary { actual_minutes: 1440, target_minutes: 1440, balance_minutes: 0, target_incomplete: false }
         );
     }
@@ -369,9 +395,9 @@ mod tests {
     fn marking_a_day_of_a_frozen_week_keeps_its_frozen_target() {
         let (_dir, mut store) = open_temp();
         store.save_holidays("2026-11-02", "2026-11-29", &[holiday("2026-11-18")]).unwrap();
-        freeze_past_weeks(&store, DAY, date("2026-11-30")).unwrap();
+        freeze_past_weeks(&store, date("2026-11-30")).unwrap();
         store.save_absence("2026-11-16", Absence::Sick).unwrap();
-        let summary = week_summary(&store, DAY, "2026-11-16").unwrap();
+        let summary = week_summary(&store, "2026-11-16").unwrap();
         assert_eq!((summary.actual_minutes, summary.target_minutes), (480, 1920));
     }
 
@@ -383,7 +409,7 @@ mod tests {
         store.save_absence("2026-12-22", Absence::Sick).unwrap();
         store.save_absence("2026-12-25", Absence::Vacation).unwrap();
         store.save_absence("2026-12-26", Absence::Vacation).unwrap();
-        let credited: Vec<(String, Kind, u32)> = day_entries(&store, DAY, "2026-12-21", "2026-12-27")
+        let credited: Vec<(String, Kind, u32)> = day_entries(&store, "2026-12-21", "2026-12-27")
             .unwrap()
             .into_iter()
             .map(|entry| (entry.date, entry.kind, entry.minutes))
@@ -403,10 +429,69 @@ mod tests {
     fn marking_returns_the_credited_minutes() {
         let (_dir, mut store) = open_temp();
         store.save_holidays("2026-12-21", "2026-12-27", &[holiday("2026-12-25")]).unwrap();
-        assert_eq!(mark_absence(&store, DAY, "2026-12-24", Absence::Sick).unwrap(), 480);
-        assert_eq!(mark_absence(&store, DAY, "2026-12-25", Absence::Vacation).unwrap(), 0);
-        assert_eq!(mark_absence(&store, DAY, "2026-12-26", Absence::Vacation).unwrap(), 0);
-        assert!(matches!(mark_absence(&store, DAY, "morgen", Absence::Sick), Err(StoreError::InvalidDate)));
+        assert_eq!(mark_absence(&store, "2026-12-24", Absence::Sick).unwrap(), 480);
+        assert_eq!(mark_absence(&store, "2026-12-25", Absence::Vacation).unwrap(), 0);
+        assert_eq!(mark_absence(&store, "2026-12-26", Absence::Vacation).unwrap(), 0);
+        assert!(matches!(mark_absence(&store, "morgen", Absence::Sick), Err(StoreError::InvalidDate)));
+    }
+
+    // --- Einstellungen pro Woche ---
+
+    #[test]
+    fn each_week_uses_the_targets_valid_in_it() {
+        let (_dir, mut store) = open_temp();
+        store.save_holidays("2026-11-16", "2026-12-06", &[holiday("2026-12-01")]).unwrap();
+        store.save_settings("2026-11-30", &settings(360, 1800)).unwrap();
+        assert_eq!(week_summary(&store, "2026-11-18").unwrap().target_minutes, 2400);
+        assert_eq!(week_summary(&store, "2026-11-25").unwrap().target_minutes, 2400);
+        assert_eq!(week_summary(&store, "2026-12-02").unwrap().target_minutes, 1800 - 360, "Feiertag am 01.12.");
+    }
+
+    #[test]
+    fn a_week_without_loaded_holidays_shows_its_weekly_target_unlowered() {
+        let (_dir, store) = open_temp();
+        store.save_settings("2027-03-01", &settings(480, 1920)).unwrap();
+        let summary = week_summary(&store, "2027-03-02").unwrap();
+        assert_eq!((summary.target_minutes, summary.target_incomplete), (1920, true));
+    }
+
+    #[test]
+    fn a_sick_day_counts_the_daily_target_of_its_own_week() {
+        let (_dir, mut store) = open_temp();
+        store.save_holidays("2026-11-16", "2026-12-06", &[]).unwrap();
+        store.save_settings("2026-11-30", &settings(360, 1800)).unwrap();
+        assert_eq!(mark_absence(&store, "2026-11-27", Absence::Sick).unwrap(), 480);
+        assert_eq!(mark_absence(&store, "2026-11-30", Absence::Sick).unwrap(), 360);
+        let minutes: Vec<u32> = day_entries(&store, "2026-11-23", "2026-12-06").unwrap().iter().map(|e| e.minutes).collect();
+        assert_eq!(minutes, [480, 360]);
+        assert_eq!(week_summary(&store, "2026-11-23").unwrap().actual_minutes, 480);
+        assert_eq!(week_summary(&store, "2026-11-30").unwrap().actual_minutes, 360);
+    }
+
+    #[test]
+    fn a_later_change_leaves_the_balance_of_past_weeks_unchanged() {
+        let (_dir, mut store) = open_temp();
+        store.save_holidays("2026-11-02", "2026-12-13", &[]).unwrap();
+        store.save_absence("2026-11-17", Absence::Vacation).unwrap();
+        work(&store, 3, 8);
+        let before = week_summary(&store, "2026-11-16").unwrap();
+        freeze_past_weeks(&store, date("2026-11-25")).unwrap();
+        crate::settings::change(&store, date("2026-11-25"), "6:00", "30:00").unwrap();
+        assert_eq!(week_summary(&store, "2026-11-16").unwrap(), before, "abgeschlossene Woche");
+        assert_eq!(week_summary(&store, "2026-11-23").unwrap().target_minutes, 2400, "laufende Woche");
+        assert_eq!(week_summary(&store, "2026-11-30").unwrap().target_minutes, 1800, "nächste Woche");
+    }
+
+    #[test]
+    fn freezing_uses_the_targets_of_each_week_not_todays() {
+        let (_dir, mut store) = open_temp();
+        store.save_holidays("2026-11-16", "2026-12-06", &[holiday("2026-12-01")]).unwrap();
+        store.save_settings("2026-11-23", &settings(480, 1920)).unwrap();
+        store.save_settings("2026-11-30", &settings(360, 1800)).unwrap();
+        freeze_past_weeks(&store, date("2026-12-07")).unwrap();
+        assert_eq!(frozen(&store, "2026-11-16"), Some(2400));
+        assert_eq!(frozen(&store, "2026-11-23"), Some(1920));
+        assert_eq!(frozen(&store, "2026-11-30"), Some(1440));
     }
 
     // --- freeze_past_weeks ---
@@ -419,7 +504,7 @@ mod tests {
     fn past_weeks_with_loaded_holidays_are_frozen_with_their_target() {
         let (_dir, mut store) = open_temp();
         store.save_holidays("2026-11-02", "2026-11-29", &[holiday("2026-11-18")]).unwrap();
-        freeze_past_weeks(&store, DAY, date("2026-11-18")).unwrap();
+        freeze_past_weeks(&store, date("2026-11-18")).unwrap();
         assert_eq!(frozen(&store, "2026-11-02"), Some(2400));
         assert_eq!(frozen(&store, "2026-11-09"), Some(2400));
         assert_eq!(frozen(&store, "2026-11-16"), None, "die Woche von heute ist noch offen");
@@ -430,7 +515,7 @@ mod tests {
     fn a_week_ending_today_is_still_the_current_week() {
         let (_dir, mut store) = open_temp();
         store.save_holidays("2026-11-02", "2026-11-29", &[]).unwrap();
-        freeze_past_weeks(&store, DAY, date("2026-11-22")).unwrap();
+        freeze_past_weeks(&store, date("2026-11-22")).unwrap();
         assert_eq!(frozen(&store, "2026-11-09"), Some(2400));
         assert_eq!(frozen(&store, "2026-11-16"), None);
     }
@@ -439,7 +524,7 @@ mod tests {
     fn the_week_after_a_finished_week_freezes_it_on_monday() {
         let (_dir, mut store) = open_temp();
         store.save_holidays("2026-11-02", "2026-11-29", &[holiday("2026-11-18")]).unwrap();
-        freeze_past_weeks(&store, DAY, date("2026-11-23")).unwrap();
+        freeze_past_weeks(&store, date("2026-11-23")).unwrap();
         assert_eq!(frozen(&store, "2026-11-16"), Some(1920));
     }
 
@@ -447,9 +532,10 @@ mod tests {
     fn a_frozen_target_is_never_overwritten() {
         let (_dir, mut store) = open_temp();
         store.save_holidays("2026-11-02", "2026-11-29", &[holiday("2026-11-18")]).unwrap();
-        freeze_past_weeks(&store, DAY, date("2026-11-30")).unwrap();
+        freeze_past_weeks(&store, date("2026-11-30")).unwrap();
         store.save_holidays("2026-11-02", "2026-11-29", &[holiday("2026-11-17"), holiday("2026-11-18")]).unwrap();
-        freeze_past_weeks(&store, 360, date("2026-12-07")).unwrap();
+        store.save_settings("2026-11-16", &settings(360, 1800)).unwrap();
+        freeze_past_weeks(&store, date("2026-12-07")).unwrap();
         assert_eq!(frozen(&store, "2026-11-16"), Some(1920));
     }
 
@@ -457,7 +543,7 @@ mod tests {
     fn weeks_without_loaded_holidays_are_not_frozen() {
         let (_dir, mut store) = open_temp();
         store.save_holidays("2026-11-02", "2026-11-29", &[]).unwrap();
-        freeze_past_weeks(&store, DAY, date("2027-03-01")).unwrap();
+        freeze_past_weeks(&store, date("2027-03-01")).unwrap();
         assert_eq!(frozen(&store, "2026-10-26"), None, "nie geladen");
         assert_eq!(frozen(&store, "2026-11-30"), None, "nie geladen");
     }
@@ -465,10 +551,10 @@ mod tests {
     #[test]
     fn a_week_loaded_later_is_frozen_at_the_next_freeze() {
         let (_dir, mut store) = open_temp();
-        freeze_past_weeks(&store, DAY, date("2026-11-30")).unwrap();
+        freeze_past_weeks(&store, date("2026-11-30")).unwrap();
         assert_eq!(frozen(&store, "2026-11-16"), None);
         store.save_holidays("2026-11-16", "2026-11-22", &[holiday("2026-11-18")]).unwrap();
-        freeze_past_weeks(&store, DAY, date("2026-11-30")).unwrap();
+        freeze_past_weeks(&store, date("2026-11-30")).unwrap();
         assert_eq!(frozen(&store, "2026-11-16"), Some(1920));
     }
 
@@ -476,7 +562,7 @@ mod tests {
     fn a_week_only_partly_inside_a_loaded_range_is_not_frozen() {
         let (_dir, mut store) = open_temp();
         store.save_holidays("2026-11-04", "2026-11-18", &[]).unwrap();
-        freeze_past_weeks(&store, DAY, date("2027-03-01")).unwrap();
+        freeze_past_weeks(&store, date("2027-03-01")).unwrap();
         assert_eq!(frozen(&store, "2026-11-02"), None);
         assert_eq!(frozen(&store, "2026-11-09"), Some(2400));
         assert_eq!(frozen(&store, "2026-11-16"), None);
@@ -487,7 +573,7 @@ mod tests {
         let (_dir, mut store) = open_temp();
         store.save_holidays("2026-11-02", "2026-11-08", &[]).unwrap();
         store.save_holidays("2026-12-21", "2026-12-27", &[holiday("2026-12-25")]).unwrap();
-        freeze_past_weeks(&store, DAY, date("2027-01-04")).unwrap();
+        freeze_past_weeks(&store, date("2027-01-04")).unwrap();
         assert_eq!(frozen(&store, "2026-11-02"), Some(2400));
         assert_eq!(frozen(&store, "2026-12-21"), Some(1920));
         assert_eq!(frozen(&store, "2026-12-14"), None);
@@ -497,7 +583,7 @@ mod tests {
     fn freezing_across_the_year_boundary() {
         let (_dir, mut store) = open_temp();
         store.save_holidays("2026-12-21", "2027-01-10", &[holiday("2026-12-25"), holiday("2027-01-01")]).unwrap();
-        freeze_past_weeks(&store, DAY, date("2027-01-11")).unwrap();
+        freeze_past_weeks(&store, date("2027-01-11")).unwrap();
         assert_eq!(frozen(&store, "2026-12-21"), Some(1920));
         assert_eq!(frozen(&store, "2026-12-28"), Some(1920));
         assert_eq!(frozen(&store, "2027-01-04"), Some(2400));
@@ -506,7 +592,7 @@ mod tests {
     #[test]
     fn freezing_without_any_loaded_range_does_nothing() {
         let (_dir, store) = open_temp();
-        freeze_past_weeks(&store, DAY, date("2026-11-30")).unwrap();
+        freeze_past_weeks(&store, date("2026-11-30")).unwrap();
         assert_eq!(frozen(&store, "2026-11-16"), None);
     }
 }

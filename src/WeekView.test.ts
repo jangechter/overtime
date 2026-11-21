@@ -419,6 +419,47 @@ describe("WeekView", () => {
       expect(wrapper.get('[data-test="week-balance"]').text()).toContain("−32:00 h");
     });
 
+    it("liest Soll und Einträge der angezeigten Woche neu, wenn Einstellungen gespeichert wurden", async () => {
+      const week = currentWeek();
+      let changed = false;
+      backend = (command) => {
+        if (command === "week_summary") return Promise.resolve(changed ? summaryAnswer(360, 1800) : summaryAnswer(480, 2400));
+        if (command === "load_entries") {
+          return Promise.resolve([
+            { date: week[0], kind: "sick", start: null, end: null, breakMinutes: null, minutes: changed ? 360 : 480 },
+          ]);
+        }
+        return answer(command);
+      };
+      const wrapper = mount(WeekView, { props: { settingsVersion: 0 } });
+      await flushPromises();
+      expect(wrapper.get('[data-test="week-target"]').text()).toContain("40:00 h");
+      changed = true;
+      await wrapper.setProps({ settingsVersion: 1 });
+      await flushPromises();
+      expect(wrapper.get('[data-test="week-target"]').text()).toContain("30:00 h");
+      expect(wrapper.findAll(".week-row")[0].get('[data-test="hours"]').text()).toBe("6:00 h");
+    });
+
+    it("meldet nach dem Speichern von Einstellungen keine geänderten Feiertage", async () => {
+      const wrapper = mount(WeekView, { props: { settingsVersion: 0 } });
+      await flushPromises();
+      const before = wrapper.emitted("holidaysChanged")?.length ?? 0;
+      await wrapper.setProps({ settingsVersion: 1 });
+      await flushPromises();
+      expect(wrapper.emitted("holidaysChanged")?.length ?? 0).toBe(before);
+    });
+
+    it("meldet geänderte Feiertage nach dem Abruf beim Start und nach „Feiertage laden“", async () => {
+      backend = (command) => (command === "load_holidays" ? Promise.resolve(holidayAnswer([], true)) : answer(command));
+      const wrapper = mount(WeekView);
+      await flushPromises();
+      expect(wrapper.emitted("holidaysChanged")).toHaveLength(1);
+      await wrapper.get('[data-test="load-holidays"]').trigger("click");
+      await flushPromises();
+      expect(wrapper.emitted("holidaysChanged")).toHaveLength(2);
+    });
+
     it("liest das Soll nach dem Abruf beim Start neu", async () => {
       let refreshed = false;
       let finishRefresh: () => void = () => {};

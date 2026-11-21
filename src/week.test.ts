@@ -1,5 +1,14 @@
 import { describe, it, expect } from "vitest";
-import { currentWeek, formatBalance, formatHours, shiftWeek } from "./week";
+import { currentWeek, formatBalance, formatDuration, formatHours, shiftWeek } from "./week";
+
+describe("formatDuration", () => {
+  it("schreibt Minuten als Stunden und Minuten ohne Einheit", () => {
+    expect(formatDuration(480)).toBe("8:00");
+    expect(formatDuration(450)).toBe("7:30");
+    expect(formatDuration(2400)).toBe("40:00");
+    expect(formatDuration(1)).toBe("0:01");
+  });
+});
 
 describe("currentWeek", () => {
   it("liefert Montag bis Sonntag mitten in der Woche", () => {

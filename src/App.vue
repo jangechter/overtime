@@ -3,8 +3,11 @@ import { ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import WeekView from "./WeekView.vue";
 import MonthView from "./MonthView.vue";
+import SettingsView from "./SettingsView.vue";
 
-const view = ref<"week" | "month">("week");
+const view = ref<"week" | "month" | "settings">("week");
+/** Zählt gespeicherte Einstellungen, damit die Wochenübersicht Soll und Krank/Urlaub neu liest. */
+const settingsVersion = ref(0);
 /** Zählt Änderungen an den gespeicherten Feiertagen, damit die Monatsansicht danach neu liest. */
 const holidaysVersion = ref(0);
 
@@ -36,16 +39,20 @@ async function exportCsv() {
       <nav class="views" aria-label="Ansicht">
         <button type="button" data-test="view-week" :aria-pressed="view === 'week'" @click="view = 'week'">Woche</button>
         <button type="button" data-test="view-month" :aria-pressed="view === 'month'" @click="view = 'month'">Monat</button>
+        <button type="button" data-test="view-settings" :aria-pressed="view === 'settings'" @click="view = 'settings'">
+          Einstellungen
+        </button>
       </nav>
       <button type="button" data-test="export" :disabled="exporting" @click="exportCsv">Export (CSV)</button>
     </header>
     <p v-if="exportMessage" class="info" role="status" data-test="export-message">{{ exportMessage }}</p>
     <p v-if="exportError" class="error" role="alert" data-test="export-error">{{ exportError }}</p>
     <!-- Beide Ansichten bleiben beim Umschalten erhalten, damit Woche und Monat ihre Position behalten. -->
-    <WeekView v-show="view === 'week'" @holidays-changed="holidaysVersion++" />
+    <WeekView v-show="view === 'week'" :settings-version="settingsVersion" @holidays-changed="holidaysVersion++" />
     <KeepAlive>
       <MonthView v-if="view === 'month'" :holidays-version="holidaysVersion" />
     </KeepAlive>
+    <SettingsView v-if="view === 'settings'" @saved="settingsVersion++" />
     <footer class="source" data-test="holiday-source">Feiertage: OpenHolidays API (ODbL)</footer>
   </main>
 </template>

@@ -12,6 +12,10 @@ let exportCsv: () => Promise<unknown> = () => Promise.resolve(null);
 const answer = (command: unknown) => {
   if (command === "load_holidays") return { holidays: [], missing: false };
   if (command === "week_summary") return { actualMinutes: 0, targetMinutes: 2400, balanceMinutes: -2400, targetIncomplete: false };
+  if (command === "load_settings" || command === "save_settings") {
+    const current = { dailyMinutes: 480, weeklyMinutes: 2400, subdivision: "DE-NW" };
+    return { current, pending: null };
+  }
   if (command === "month_summary") return { actualMinutes: 0, averageMinutes: null, countedDays: 0, otherMinutes: 0, holidaysMissing: false };
   return [];
 };
@@ -126,6 +130,35 @@ describe("App", () => {
     const labels = wrapper.findAll("nav").map((nav) => nav.attributes("aria-label"));
     expect(labels).toEqual(["Ansicht", "Woche wählen", "Monat wählen"]);
     wrapper.unmount();
+  });
+
+  describe("Einstellungen", () => {
+    it("öffnet die Einstellungen über den Umschalter", async () => {
+      const wrapper = mount(App, { attachTo: document.body });
+      await flushPromises();
+      await wrapper.get('[data-test="view-settings"]').trigger("click");
+      await flushPromises();
+      expect(calls).toContainEqual(["load_settings"]);
+      expect(isVisible(wrapper, "settings-current")).toBe(true);
+      expect(isVisible(wrapper, "week-label")).toBe(false);
+      expect(wrapper.get('[data-test="view-settings"]').attributes("aria-pressed")).toBe("true");
+      wrapper.unmount();
+    });
+
+    it("liest die Woche nach dem Speichern der Einstellungen neu", async () => {
+      const wrapper = mount(App, { attachTo: document.body });
+      await flushPromises();
+      await wrapper.get('[data-test="view-settings"]').trigger("click");
+      await flushPromises();
+      const summaries = count("week_summary");
+      const entries = count("load_entries");
+      await wrapper.get("form").trigger("submit");
+      await flushPromises();
+      expect(calls).toContainEqual(["save_settings", { daily: "8:00", weekly: "40:00" }]);
+      expect(count("week_summary")).toBe(summaries + 1);
+      expect(count("load_entries")).toBe(entries + 1);
+      wrapper.unmount();
+    });
   });
 
   describe("Export", () => {

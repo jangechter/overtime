@@ -16,9 +16,14 @@ export function shiftWeek(week: string[], weeks: number): string[] {
   return currentWeek(new Date(year, month - 1, day + weeks * 7));
 }
 
+/** Minuten als `H:MM`, z. B. 480 → „8:00“ (für Eingabefelder). */
+export function formatDuration(minutes: number): string {
+  return `${Math.floor(minutes / 60)}:${pad(minutes % 60)}`;
+}
+
 /** Minuten als `H:MM h`, z. B. 480 → „8:00 h“. */
 export function formatHours(minutes: number): string {
-  return `${Math.floor(minutes / 60)}:${pad(minutes % 60)} h`;
+  return `${formatDuration(minutes)} h`;
 }
 
 /** Saldo mit Vorzeichen: „+5:00 h“, „−5:00 h“ (Minuszeichen), ausgeglichen „0:00 h“. */

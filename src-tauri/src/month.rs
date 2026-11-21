@@ -32,11 +32,11 @@ pub fn month_of(date: &str) -> Result<(String, String), StoreError> {
 }
 
 /// Summe und Durchschnitt des Monats, in dem `date` liegt. Wochen über die Monatsgrenze werden tageweise zugeordnet.
-pub fn month_summary(store: &Store, daily_minutes: u32, date: &str) -> Result<MonthSummary, StoreError> {
+pub fn month_summary(store: &Store, date: &str) -> Result<MonthSummary, StoreError> {
     let (from, to) = month_of(date)?;
     let holidays = store.holidays_between(&from, &to)?;
     let (mut actual_minutes, mut counted_minutes, mut counted_days, mut holidays_missing) = (0, 0, 0, false);
-    for entry in day_entries(store, daily_minutes, &from, &to)? {
+    for entry in day_entries(store, &from, &to)? {
         actual_minutes += entry.minutes;
         let weekday = NaiveDate::parse_from_str(&entry.date, "%Y-%m-%d")
             .is_ok_and(|day| day.weekday().number_from_monday() <= 5);
@@ -59,10 +59,8 @@ pub fn month_summary(store: &Store, daily_minutes: u32, date: &str) -> Result<Mo
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::settings::Settings;
     use crate::store::{Absence, Holiday};
-    use crate::target::DAILY_TARGET_MINUTES;
-
-    const DAY: u32 = DAILY_TARGET_MINUTES;
 
     fn open_temp() -> (tempfile::TempDir, Store) {
         let dir = tempfile::tempdir().unwrap();
@@ -80,7 +78,7 @@ mod tests {
     }
 
     fn summary(store: &Store, date: &str) -> MonthSummary {
-        month_summary(store, DAY, date).unwrap()
+        month_summary(store, date).unwrap()
     }
 
     // --- month_of ---
@@ -242,6 +240,19 @@ mod tests {
     #[test]
     fn month_summary_rejects_a_malformed_date() {
         let (_dir, store) = open_temp();
-        assert!(matches!(month_summary(&store, DAY, "morgen"), Err(StoreError::InvalidDate)));
+        assert!(matches!(month_summary(&store, "morgen"), Err(StoreError::InvalidDate)));
+    }
+
+    #[test]
+    fn a_month_with_two_daily_targets_credits_each_sick_day_with_its_own() {
+        let (_dir, mut store) = open_temp();
+        store.save_holidays("2026-11-23", "2026-12-06", &[]).unwrap();
+        store.save_settings("2026-11-30", &Settings { daily_minutes: 360, weekly_minutes: 1800, subdivision: "DE-NW".into() }).unwrap();
+        store.save_absence("2026-11-27", Absence::Sick).unwrap();
+        store.save_absence("2026-12-01", Absence::Sick).unwrap();
+        store.save_absence("2026-12-02", Absence::Vacation).unwrap();
+        assert_eq!(summary(&store, "2026-11-01").actual_minutes, 480);
+        let december = summary(&store, "2026-12-01");
+        assert_eq!((december.actual_minutes, december.average_minutes), (720, Some(360)));
     }
 }

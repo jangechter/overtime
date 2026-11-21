@@ -40,7 +40,6 @@ impl From<StoreError> for ExportError {
 /// wird erst nach der Auswahl gesperrt, damit Eingaben nicht warten, solange der Dialog offen ist.
 pub fn export(
     store: &Mutex<Store>,
-    daily_minutes: u32,
     choose_path: impl FnOnce() -> Result<Option<PathBuf>, ExportError>,
 ) -> Result<Option<PathBuf>, ExportError> {
     let Some(path) = choose_path()? else { return Ok(None) };
@@ -49,7 +48,7 @@ pub fn export(
             eprintln!("Sperre des Datenspeichers fehlgeschlagen: {e}");
             ExportError::StoreUnavailable
         })?;
-        render(&day_entries(&store, daily_minutes, ALL_DAYS.0, ALL_DAYS.1)?)
+        render(&day_entries(&store, ALL_DAYS.0, ALL_DAYS.1)?)
     };
     write(&path, &csv)?;
     Ok(Some(path))
@@ -126,10 +125,8 @@ impl std::fmt::Display for ExportError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::settings::Settings;
     use crate::store::{Absence, Holiday};
-    use crate::target::DAILY_TARGET_MINUTES;
-
-    const DAY: u32 = DAILY_TARGET_MINUTES;
 
     fn open_temp() -> (tempfile::TempDir, Mutex<Store>) {
         let dir = tempfile::tempdir().unwrap();
@@ -141,7 +138,7 @@ mod tests {
     fn exported(dir: &tempfile::TempDir, store: &Mutex<Store>) -> String {
         let path = dir.path().join("export.csv");
         let chosen = path.clone();
-        let result = export(store, DAY, || {
+        let result = export(store, || {
             assert!(store.try_lock().is_ok(), "der Datenspeicher ist gesperrt, solange der Dialog offen ist");
             Ok(Some(chosen))
         });
@@ -239,7 +236,7 @@ mod tests {
     fn a_cancelled_dialog_writes_nothing_and_leaves_the_store_unlocked() {
         let (dir, store) = open_temp();
         store.lock().unwrap().save("2026-11-16", "08:00", "16:30", 30.0).unwrap();
-        let result = export(&store, DAY, || {
+        let result = export(&store, || {
             assert!(store.try_lock().is_ok(), "der Datenspeicher ist gesperrt, solange der Dialog offen ist");
             Ok(None)
         });
@@ -257,7 +254,7 @@ mod tests {
     #[test]
     fn an_unusable_location_gives_a_german_message_and_writes_nothing() {
         let (dir, store) = open_temp();
-        let error = export(&store, DAY, || Err(ExportError::InvalidPath)).err().unwrap();
+        let error = export(&store, || Err(ExportError::InvalidPath)).err().unwrap();
         assert_eq!(error.to_string(), "Der gewählte Speicherort kann nicht verwendet werden. Bitte einen anderen wählen.");
         assert_eq!(files_in(&dir), ["overtime.db"]);
     }
@@ -274,7 +271,7 @@ mod tests {
                 .join()
         });
         let path = dir.path().join("export.csv");
-        let error = export(&store, DAY, || Ok(Some(path.clone()))).err().unwrap();
+        let error = export(&store, || Ok(Some(path.clone()))).err().unwrap();
         assert!(matches!(error, ExportError::StoreUnavailable));
         assert_eq!(error.to_string(), crate::STORE_UNAVAILABLE);
         assert!(!path.exists());
@@ -286,7 +283,7 @@ mod tests {
         let path = dir.path().join("export.csv");
         std::fs::write(&path, "letzter Export").unwrap();
         std::fs::create_dir(dir.path().join("export.csv.tmp")).unwrap();
-        assert!(matches!(export(&store, DAY, || Ok(Some(path.clone()))), Err(ExportError::Write(_))));
+        assert!(matches!(export(&store, || Ok(Some(path.clone()))), Err(ExportError::Write(_))));
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "letzter Export");
         assert_eq!(files_in(&dir), ["export.csv", "export.csv.tmp", "overtime.db"], "nur das vorher angelegte Verzeichnis");
     }
@@ -296,6 +293,18 @@ mod tests {
         let (dir, store) = open_temp();
         exported(&dir, &store);
         assert_eq!(files_in(&dir), ["export.csv", "overtime.db"]);
+    }
+
+    #[test]
+    fn sick_days_are_exported_with_the_daily_target_of_their_week() {
+        let (dir, store) = open_temp();
+        {
+            let store = store.lock().unwrap();
+            store.save_settings("2026-11-30", &Settings { daily_minutes: 360, weekly_minutes: 1800, subdivision: "DE-NW".into() }).unwrap();
+            store.save_absence("2026-11-27", Absence::Sick).unwrap();
+            store.save_absence("2026-11-30", Absence::Sick).unwrap();
+        }
+        assert_eq!(lines(&exported(&dir, &store))[1..], ["27.11.2026;;;;8,00;Krank", "30.11.2026;;;;6,00;Krank"]);
     }
 
     #[test]
@@ -311,7 +320,7 @@ mod tests {
     fn an_unwritable_location_gives_a_german_message() {
         let (dir, store) = open_temp();
         let path = dir.path().join("fehlt").join("export.csv");
-        let error = export(&store, DAY, || Ok(Some(path.clone()))).err().unwrap();
+        let error = export(&store, || Ok(Some(path.clone()))).err().unwrap();
         assert!(matches!(error, ExportError::Write(_)));
         assert_eq!(error.to_string(), "Die Datei konnte nicht gespeichert werden. Bitte einen anderen Speicherort wählen.");
     }
