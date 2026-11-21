@@ -515,3 +515,6 @@ $RECYCLE.BIN/
 
 # Tauri-generated schemas
 src-tauri/gen/schemas/
+
+# Obsidian (Notiz-App, öffnet das Repo als Vault)
+.obsidian/
