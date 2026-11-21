@@ -2,8 +2,9 @@
 
 use std::path::Path;
 
+use rusqlite::types::{FromSql, FromSqlError, FromSqlResult, ToSql, ToSqlOutput, ValueRef};
 use rusqlite::{Connection, OptionalExtension};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::hours::{worked_minutes, HoursError};
 
@@ -18,13 +19,64 @@ pub enum StoreError {
     Db(rusqlite::Error),
 }
 
+/// Art eines Tageseintrags: gearbeitet (mit Start, Ende und Pause) oder als krank bzw. Urlaub markiert (ohne Zeiten).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Kind {
+    Work,
+    Sick,
+    Vacation,
+}
+
+/// Die Markierungen, die sich für einen Tag setzen lassen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Absence {
+    Sick,
+    Vacation,
+}
+
+impl From<Absence> for Kind {
+    fn from(absence: Absence) -> Self {
+        match absence {
+            Absence::Sick => Kind::Sick,
+            Absence::Vacation => Kind::Vacation,
+        }
+    }
+}
+
+impl ToSql for Kind {
+    fn to_sql(&self) -> rusqlite::Result<ToSqlOutput<'_>> {
+        Ok(match self {
+            Kind::Work => "work",
+            Kind::Sick => "sick",
+            Kind::Vacation => "vacation",
+        }
+        .into())
+    }
+}
+
+impl FromSql for Kind {
+    fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
+        match value.as_str()? {
+            "work" => Ok(Kind::Work),
+            "sick" => Ok(Kind::Sick),
+            "vacation" => Ok(Kind::Vacation),
+            _ => Err(FromSqlError::InvalidType),
+        }
+    }
+}
+
+/// Ein gespeicherter Tag. Bei Krank/Urlaub sind Start, Ende und Pause leer und `minutes` ist 0; die angerechneten
+/// Minuten setzt erst `target::day_entries`, weil sie von Feiertagen und Tagessoll abhängen.
 #[derive(Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Entry {
     pub date: String,
-    pub start: String,
-    pub end: String,
-    pub break_minutes: u32,
+    pub kind: Kind,
+    pub start: Option<String>,
+    pub end: Option<String>,
+    pub break_minutes: Option<u32>,
     pub minutes: u32,
 }
 
@@ -46,8 +98,9 @@ pub struct Store {
 }
 
 /// Aktuelle Version des Datenbankschemas (`PRAGMA user_version`). 0 heißt: neue Datenbank oder Stand bis S4b ohne Version,
-/// 1: mit Spalte `minutes` (S5a), 2: mit Tabelle `week_targets` (S5b).
-const SCHEMA_VERSION: i64 = 2;
+/// 1: mit Spalte `minutes` (S5a), 2: mit Tabelle `week_targets` (S5b), 3: mit Spalte `kind` für Krank/Urlaub,
+/// Zeiten dann leer (Plan B S1).
+const SCHEMA_VERSION: i64 = 3;
 
 impl Store {
     pub fn open(path: &Path) -> Result<Store, StoreError> {
@@ -61,10 +114,20 @@ impl Store {
         check_date(date)?;
         let minutes = worked_minutes(start, end, break_minutes)?;
         self.conn.execute(
-            "INSERT OR REPLACE INTO entries (date, start, end, break_minutes, minutes) VALUES (?1, ?2, ?3, ?4, ?5)",
-            (date, start, end, break_minutes as u32, minutes),
+            "INSERT OR REPLACE INTO entries (date, kind, start, end, break_minutes, minutes) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            (date, Kind::Work, start, end, break_minutes as u32, minutes),
         )?;
         Ok(minutes)
+    }
+
+    /// Markiert den Tag als krank oder Urlaub und ersetzt dabei einen vorhandenen Eintrag samt Zeiten.
+    pub fn save_absence(&self, date: &str, absence: Absence) -> Result<(), StoreError> {
+        check_date(date)?;
+        self.conn.execute(
+            "INSERT OR REPLACE INTO entries (date, kind, start, end, break_minutes, minutes) VALUES (?1, ?2, NULL, NULL, NULL, 0)",
+            (date, Kind::from(absence)),
+        )?;
+        Ok(())
     }
 
     pub fn delete(&self, date: &str) -> Result<(), StoreError> {
@@ -74,20 +137,21 @@ impl Store {
     }
 
     /// Einträge von `from` bis `to` (beide einschließlich), nach Datum sortiert. Die Arbeitsminuten
-    /// sind die beim Speichern berechneten und werden nicht neu berechnet.
+    /// sind die beim Speichern berechneten und werden nicht neu berechnet; Krank/Urlaub hat hier 0 Minuten.
     pub fn between(&self, from: &str, to: &str) -> Result<Vec<Entry>, StoreError> {
         check_date(from)?;
         check_date(to)?;
         let mut statement = self.conn.prepare(
-            "SELECT date, start, end, break_minutes, minutes FROM entries WHERE date BETWEEN ?1 AND ?2 ORDER BY date",
+            "SELECT date, kind, start, end, break_minutes, minutes FROM entries WHERE date BETWEEN ?1 AND ?2 ORDER BY date",
         )?;
         let rows = statement.query_map([from, to], |row| {
             Ok(Entry {
                 date: row.get(0)?,
-                start: row.get(1)?,
-                end: row.get(2)?,
-                break_minutes: row.get(3)?,
-                minutes: row.get(4)?,
+                kind: row.get(1)?,
+                start: row.get(2)?,
+                end: row.get(3)?,
+                break_minutes: row.get(4)?,
+                minutes: row.get(5)?,
             })
         })?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
@@ -157,17 +221,6 @@ impl Store {
             (week_start, minutes),
         )?;
         Ok(())
-    }
-
-    /// Summe der gespeicherten Arbeitsminuten von `from` bis `to` (beide einschließlich).
-    pub fn week_total(&self, from: &str, to: &str) -> Result<u32, StoreError> {
-        check_date(from)?;
-        check_date(to)?;
-        Ok(self.conn.query_row(
-            "SELECT COALESCE(SUM(minutes), 0) FROM entries WHERE date BETWEEN ?1 AND ?2",
-            [from, to],
-            |row| row.get(0),
-        )?)
     }
 
     /// Feiertage von `from` bis `to` samt Angabe, ob der Zeitraum nie geladen wurde.
@@ -246,6 +299,25 @@ fn migrate(conn: &mut Connection) -> Result<(), StoreError> {
             );",
         )?;
     }
+    if version < 3 {
+        // SQLite kann `NOT NULL` nicht entfernen, deshalb wird `entries` neu angelegt. Bestehende Zeilen sind Arbeitstage
+        // und behalten ihre gespeicherten Minuten.
+        tx.execute_batch(
+            "CREATE TABLE entries_v3 (
+                date TEXT PRIMARY KEY,
+                kind TEXT NOT NULL CHECK (kind IN ('work', 'sick', 'vacation')),
+                start TEXT,
+                end TEXT,
+                break_minutes INTEGER,
+                minutes INTEGER NOT NULL,
+                CHECK ((kind = 'work') = (start IS NOT NULL AND end IS NOT NULL AND break_minutes IS NOT NULL))
+            );
+            INSERT INTO entries_v3 (date, kind, start, end, break_minutes, minutes)
+                SELECT date, 'work', start, end, break_minutes, minutes FROM entries;
+            DROP TABLE entries;
+            ALTER TABLE entries_v3 RENAME TO entries;",
+        )?;
+    }
     tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     tx.commit()?;
     Ok(())
@@ -315,7 +387,18 @@ mod tests {
     use super::*;
 
     fn entry(date: &str, start: &str, end: &str, break_minutes: u32, minutes: u32) -> Entry {
-        Entry { date: date.into(), start: start.into(), end: end.into(), break_minutes, minutes }
+        Entry {
+            date: date.into(),
+            kind: Kind::Work,
+            start: Some(start.into()),
+            end: Some(end.into()),
+            break_minutes: Some(break_minutes),
+            minutes,
+        }
+    }
+
+    fn absence(date: &str, kind: Kind) -> Entry {
+        Entry { date: date.into(), kind, start: None, end: None, break_minutes: None, minutes: 0 }
     }
 
     fn open_temp() -> (tempfile::TempDir, Store) {
@@ -394,7 +477,7 @@ mod tests {
         let (_dir, store) = open_temp();
         store.save("2026-11-16", "08:00", "16:30", 30.0).unwrap();
         assert!(store.save("2026-11-16", "16:00", "08:00", 0.0).is_err());
-        assert_eq!(store.between("2026-11-16", "2026-11-16").unwrap()[0].end, "16:30");
+        assert_eq!(store.between("2026-11-16", "2026-11-16").unwrap()[0].end.as_deref(), Some("16:30"));
     }
 
     #[test]
@@ -634,54 +717,11 @@ mod tests {
     }
 
     #[test]
-    fn week_total_is_zero_without_entries() {
-        let (_dir, store) = open_temp();
-        assert_eq!(store.week_total("2026-11-16", "2026-11-22").unwrap(), 0);
-    }
-
-    #[test]
-    fn week_total_sums_the_stored_minutes_of_the_week_only() {
-        let (_dir, store) = open_temp();
-        store.save("2026-11-15", "08:00", "12:00", 0.0).unwrap();
-        store.save("2026-11-16", "08:00", "16:30", 30.0).unwrap();
-        store.save("2026-11-18", "09:00", "12:15", 0.0).unwrap();
-        store.save("2026-11-22", "10:00", "11:00", 0.0).unwrap();
-        store.save("2026-11-23", "08:00", "12:00", 0.0).unwrap();
-        assert_eq!(store.week_total("2026-11-16", "2026-11-22").unwrap(), 480 + 195 + 60);
-    }
-
-    #[test]
-    fn week_total_follows_replacing_and_deleting_entries() {
-        let (_dir, store) = open_temp();
-        store.save("2026-11-16", "08:00", "16:30", 30.0).unwrap();
-        store.save("2026-11-17", "08:00", "12:00", 0.0).unwrap();
-        store.save("2026-11-16", "08:00", "10:00", 0.0).unwrap();
-        assert_eq!(store.week_total("2026-11-16", "2026-11-22").unwrap(), 120 + 240);
-        store.delete("2026-11-17").unwrap();
-        assert_eq!(store.week_total("2026-11-16", "2026-11-22").unwrap(), 120);
-    }
-
-    #[test]
-    fn week_total_across_the_year_boundary() {
-        let (_dir, store) = open_temp();
-        for date in ["2026-12-27", "2026-12-28", "2027-01-01", "2027-01-03", "2027-01-04"] {
-            store.save(date, "08:00", "12:00", 0.0).unwrap();
-        }
-        assert_eq!(store.week_total("2026-12-28", "2027-01-03").unwrap(), 3 * 240);
-    }
-
-    #[test]
-    fn week_total_rejects_a_malformed_date() {
-        let (_dir, store) = open_temp();
-        assert!(matches!(store.week_total("morgen", "2026-11-22"), Err(StoreError::InvalidDate)));
-    }
-
-    #[test]
     fn fresh_database_gets_the_current_schema_version_and_the_minutes_column() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("overtime.db");
         Store::open(&path).unwrap();
-        assert_eq!(schema_version(&path), 2);
+        assert_eq!(schema_version(&path), 3);
         assert!(has_minutes_column(&path));
     }
 
@@ -695,10 +735,9 @@ mod tests {
             store.between("2026-11-16", "2026-11-22").unwrap(),
             vec![entry("2026-11-16", "08:00", "16:30", 30, 480), entry("2026-11-17", "09:00", "12:00", 0, 180)]
         );
-        assert_eq!(store.week_total("2026-11-16", "2026-11-22").unwrap(), 660);
         assert_eq!(store.holidays_between("2026-12-25", "2026-12-25").unwrap(), vec![holiday("2026-12-25", "1. Weihnachtsfeiertag")]);
         assert!(store.is_loaded("2026-12-01", "2027-02-01").unwrap());
-        assert_eq!(schema_version(&path), 2);
+        assert_eq!(schema_version(&path), 3);
     }
 
     #[test]
@@ -798,6 +837,115 @@ mod tests {
         assert_eq!(store.between("2026-11-16", "2026-11-16").unwrap()[0].minutes, 999, "Minuten werden nicht neu berechnet");
         store.freeze_week_target("2026-11-16", 1920).unwrap();
         assert_eq!(store.week_target("2026-11-16").unwrap(), Some(1920));
-        assert_eq!(schema_version(&path), 2);
+        assert_eq!(schema_version(&path), 3);
+    }
+
+    #[test]
+    fn marked_day_is_read_back_without_times() {
+        let (_dir, store) = open_temp();
+        store.save_absence("2026-11-16", Absence::Vacation).unwrap();
+        store.save_absence("2026-11-17", Absence::Sick).unwrap();
+        assert_eq!(
+            store.between("2026-11-16", "2026-11-22").unwrap(),
+            vec![absence("2026-11-16", Kind::Vacation), absence("2026-11-17", Kind::Sick)]
+        );
+    }
+
+    #[test]
+    fn marking_replaces_the_times_of_a_worked_day() {
+        let (_dir, store) = open_temp();
+        store.save("2026-11-16", "08:00", "16:30", 30.0).unwrap();
+        store.save_absence("2026-11-16", Absence::Sick).unwrap();
+        assert_eq!(store.between("2026-11-16", "2026-11-16").unwrap(), vec![absence("2026-11-16", Kind::Sick)]);
+    }
+
+    #[test]
+    fn saving_times_replaces_a_marking() {
+        let (_dir, store) = open_temp();
+        store.save_absence("2026-11-16", Absence::Vacation).unwrap();
+        store.save("2026-11-16", "08:00", "16:30", 30.0).unwrap();
+        assert_eq!(store.between("2026-11-16", "2026-11-16").unwrap(), vec![entry("2026-11-16", "08:00", "16:30", 30, 480)]);
+    }
+
+    #[test]
+    fn deleting_a_marked_day_removes_the_marking() {
+        let (_dir, store) = open_temp();
+        store.save_absence("2026-11-16", Absence::Vacation).unwrap();
+        store.delete("2026-11-16").unwrap();
+        assert!(store.between("2026-11-16", "2026-11-16").unwrap().is_empty());
+    }
+
+    #[test]
+    fn marking_survives_reopening_the_database() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("overtime.db");
+        Store::open(&path).unwrap().save_absence("2026-11-16", Absence::Sick).unwrap();
+        assert_eq!(Store::open(&path).unwrap().between("2026-11-16", "2026-11-16").unwrap(), vec![absence("2026-11-16", Kind::Sick)]);
+    }
+
+    #[test]
+    fn marking_rejects_a_malformed_date() {
+        let (_dir, store) = open_temp();
+        assert!(matches!(store.save_absence("morgen", Absence::Sick), Err(StoreError::InvalidDate)));
+    }
+
+    #[test]
+    fn the_database_rejects_a_worked_day_without_times_and_a_marked_day_with_times() {
+        let (_dir, store) = open_temp();
+        let rejected = |values: &str| {
+            store
+                .conn
+                .execute(&format!("INSERT INTO entries (date, kind, start, end, break_minutes, minutes) VALUES {values}"), [])
+                .unwrap_err()
+                .to_string()
+        };
+        for values in [
+            "('2026-11-16', 'work', NULL, NULL, NULL, 0)",
+            "('2026-11-16', 'work', '08:00', '16:00', NULL, 480)",
+            "('2026-11-16', 'sick', '08:00', '16:00', 0, 0)",
+            "('2026-11-16', 'holiday', NULL, NULL, NULL, 0)",
+        ] {
+            assert!(rejected(values).contains("CHECK constraint failed"), "{values}");
+        }
+        assert!(store.between("2026-11-16", "2026-11-16").unwrap().is_empty());
+    }
+
+    #[test]
+    fn database_in_the_s5b_schema_gets_the_kind_column_and_keeps_its_data() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("overtime.db");
+        raw(&path)
+            .execute_batch(
+                "CREATE TABLE entries (date TEXT PRIMARY KEY, start TEXT NOT NULL, end TEXT NOT NULL, break_minutes INTEGER NOT NULL, minutes INTEGER NOT NULL);
+                CREATE TABLE holidays (date TEXT PRIMARY KEY, name TEXT NOT NULL);
+                CREATE TABLE loaded_ranges (from_date TEXT NOT NULL, to_date TEXT NOT NULL, PRIMARY KEY (from_date, to_date));
+                CREATE TABLE week_targets (week_start TEXT PRIMARY KEY, target_minutes INTEGER NOT NULL);
+                INSERT INTO entries VALUES ('2026-11-16', '08:00', '16:30', 30, 999);
+                INSERT INTO holidays VALUES ('2026-12-25', '1. Weihnachtsfeiertag');
+                INSERT INTO loaded_ranges VALUES ('2026-11-02', '2027-02-21');
+                INSERT INTO week_targets VALUES ('2026-11-09', 2400);
+                PRAGMA user_version = 2;",
+            )
+            .unwrap();
+        let store = Store::open(&path).unwrap();
+        assert_eq!(
+            store.between("2026-11-16", "2026-11-16").unwrap(),
+            vec![entry("2026-11-16", "08:00", "16:30", 30, 999)],
+            "Arbeitstag mit unveränderten Minuten"
+        );
+        assert_eq!(store.week_target("2026-11-09").unwrap(), Some(2400));
+        assert_eq!(store.holidays_between("2026-12-25", "2026-12-25").unwrap().len(), 1);
+        assert!(store.is_loaded("2026-11-02", "2027-02-21").unwrap());
+        store.save_absence("2026-11-17", Absence::Vacation).unwrap();
+        assert_eq!(schema_version(&path), 3);
+    }
+
+    #[test]
+    fn migration_to_the_kind_column_runs_only_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("overtime.db");
+        Store::open(&path).unwrap().save_absence("2026-11-16", Absence::Sick).unwrap();
+        let reopened = Store::open(&path).unwrap();
+        assert_eq!(reopened.between("2026-11-16", "2026-11-16").unwrap(), vec![absence("2026-11-16", Kind::Sick)]);
     }
 }

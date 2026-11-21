@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use tauri::Manager;
 
 use holidays::OpenHolidays;
-use store::{Entry, Store, WeekHolidays};
+use store::{Absence, Entry, Store, WeekHolidays};
 
 pub(crate) const STORE_UNAVAILABLE: &str = "Interner Fehler: Der Datenspeicher ist nicht verfügbar. Bitte die App neu starten.";
 
@@ -77,10 +77,18 @@ fn delete_entry(state: tauri::State<AppStore>, date: String) -> Result<(), Strin
     store.delete(&date).map_err(|e| e.to_string())
 }
 
+/// Markiert den Tag als krank oder Urlaub und gibt die angerechneten Minuten zurück.
+#[tauri::command]
+fn mark_absence(state: tauri::State<AppStore>, date: String, kind: Absence) -> Result<u32, String> {
+    let store = lock(&state)?;
+    target::mark_absence(&store, target::DAILY_TARGET_MINUTES, &date, kind).map_err(|e| e.to_string())
+}
+
+/// Einträge von `from` bis `to`; Krank/Urlaub mit den angerechneten Minuten.
 #[tauri::command]
 fn load_entries(state: tauri::State<AppStore>, from: String, to: String) -> Result<Vec<Entry>, String> {
     let store = lock(&state)?;
-    store.between(&from, &to).map_err(|e| e.to_string())
+    target::day_entries(&store, target::DAILY_TARGET_MINUTES, &from, &to).map_err(|e| e.to_string())
 }
 
 /// Ist, Soll und Saldo der Woche, in der `date` liegt.
@@ -134,7 +142,7 @@ pub fn run() {
             app.manage(AppStore(open_store(&dir.join("overtime.db"), chrono::Local::now().date_naive())));
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![save_entry, delete_entry, load_entries, week_summary, load_holidays, refresh_holidays, fetch_week_holidays])
+        .invoke_handler(tauri::generate_handler![save_entry, delete_entry, mark_absence, load_entries, week_summary, load_holidays, refresh_holidays, fetch_week_holidays])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

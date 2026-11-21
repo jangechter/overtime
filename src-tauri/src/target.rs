@@ -1,9 +1,9 @@
-//! Soll und Saldo einer Woche; das Soll abgeschlossener Wochen wird eingefroren.
+//! Ist, Soll und Saldo einer Woche; das Soll abgeschlossener Wochen wird eingefroren.
 
 use chrono::{Datelike, Days, NaiveDate};
 use serde::Serialize;
 
-use crate::store::{Holiday, Store, StoreError};
+use crate::store::{Absence, Entry, Holiday, Kind, Store, StoreError};
 use crate::week::{format_date, monday_of, week_of};
 
 /// Tagessoll Montag bis Freitag in Minuten (8 h). Wird als Parameter durchgereicht, damit die Einstellungen
@@ -34,10 +34,39 @@ fn parse(date: &str) -> Option<NaiveDate> {
     NaiveDate::parse_from_str(date, "%Y-%m-%d").ok()
 }
 
+/// Angerechnete Minuten eines Krank- oder Urlaubstags: das Tagessoll Montag bis Freitag. An einem Feiertag gilt der
+/// Feiertag (Soll schon gesenkt) und am Wochenende gibt es kein Soll, dort zählt die Markierung 0.
+pub fn absence_minutes(daily_minutes: u32, date: &str, holidays: &[Holiday]) -> u32 {
+    let weekday = parse(date).is_some_and(|day| day.weekday().number_from_monday() <= 5);
+    let holiday = holidays.iter().any(|holiday| holiday.date == date);
+    if weekday && !holiday {
+        daily_minutes
+    } else {
+        0
+    }
+}
+
+/// Einträge von `from` bis `to` mit den Minuten, die ins Ist zählen. Krank/Urlaub wird bei jedem Aufruf mit den dann
+/// gespeicherten Feiertagen angerechnet, damit im Voraus eingetragener Urlaub nach dem Laden der Feiertage stimmt.
+pub fn day_entries(store: &Store, daily_minutes: u32, from: &str, to: &str) -> Result<Vec<Entry>, StoreError> {
+    let mut entries = store.between(from, to)?;
+    let holidays = store.holidays_between(from, to)?;
+    for entry in entries.iter_mut().filter(|entry| entry.kind != Kind::Work) {
+        entry.minutes = absence_minutes(daily_minutes, &entry.date, &holidays);
+    }
+    Ok(entries)
+}
+
+/// Markiert `date` als krank oder Urlaub (ersetzt einen Eintrag) und gibt die angerechneten Minuten zurück.
+pub fn mark_absence(store: &Store, daily_minutes: u32, date: &str, absence: Absence) -> Result<u32, StoreError> {
+    store.save_absence(date, absence)?;
+    Ok(absence_minutes(daily_minutes, date, &store.holidays_between(date, date)?))
+}
+
 /// Ist, Soll und Saldo der Woche, in der `date` liegt. Ein eingefrorenes Soll hat Vorrang vor der Berechnung.
 pub fn week_summary(store: &Store, daily_minutes: u32, date: &str) -> Result<WeekSummary, StoreError> {
     let (from, to) = week_of(date)?;
-    let actual_minutes = store.week_total(&from, &to)?;
+    let actual_minutes = day_entries(store, daily_minutes, &from, &to)?.iter().map(|entry| entry.minutes).sum();
     let (target_minutes, target_incomplete) = match store.week_target(&from)? {
         Some(frozen) => (frozen, false),
         None => {
@@ -201,6 +230,183 @@ mod tests {
         let summary = week_summary(&store, DAY, "2026-11-16").unwrap();
         assert_eq!(summary.target_minutes, 1920);
         assert!(!summary.target_incomplete);
+    }
+
+    #[test]
+    fn actual_is_zero_without_entries() {
+        let (_dir, store) = open_temp();
+        assert_eq!(week_summary(&store, DAY, "2026-11-16").unwrap().actual_minutes, 0);
+    }
+
+    #[test]
+    fn actual_sums_the_stored_minutes_of_the_week_only() {
+        let (_dir, store) = open_temp();
+        store.save("2026-11-15", "08:00", "12:00", 0.0).unwrap();
+        store.save("2026-11-16", "08:00", "16:30", 30.0).unwrap();
+        store.save("2026-11-18", "09:00", "12:15", 0.0).unwrap();
+        store.save("2026-11-22", "10:00", "11:00", 0.0).unwrap();
+        store.save("2026-11-23", "08:00", "12:00", 0.0).unwrap();
+        assert_eq!(week_summary(&store, DAY, "2026-11-18").unwrap().actual_minutes, 480 + 195 + 60);
+    }
+
+    #[test]
+    fn actual_follows_replacing_and_deleting_entries() {
+        let (_dir, store) = open_temp();
+        store.save("2026-11-16", "08:00", "16:30", 30.0).unwrap();
+        store.save("2026-11-17", "08:00", "12:00", 0.0).unwrap();
+        store.save("2026-11-16", "08:00", "10:00", 0.0).unwrap();
+        assert_eq!(week_summary(&store, DAY, "2026-11-16").unwrap().actual_minutes, 120 + 240);
+        store.delete("2026-11-17").unwrap();
+        assert_eq!(week_summary(&store, DAY, "2026-11-16").unwrap().actual_minutes, 120);
+    }
+
+    #[test]
+    fn actual_across_the_year_boundary() {
+        let (_dir, store) = open_temp();
+        for date in ["2026-12-27", "2026-12-28", "2027-01-01", "2027-01-03", "2027-01-04"] {
+            store.save(date, "08:00", "12:00", 0.0).unwrap();
+        }
+        assert_eq!(week_summary(&store, DAY, "2027-01-01").unwrap().actual_minutes, 3 * 240);
+    }
+
+    #[test]
+    fn stored_work_minutes_are_not_recalculated_for_the_actual() {
+        let (dir, store) = open_temp();
+        store.save("2026-11-16", "08:00", "16:30", 30.0).unwrap();
+        rusqlite::Connection::open(dir.path().join("overtime.db"))
+            .unwrap()
+            .execute("UPDATE entries SET minutes = 123 WHERE date = '2026-11-16'", [])
+            .unwrap();
+        assert_eq!(week_summary(&store, DAY, "2026-11-16").unwrap().actual_minutes, 123);
+    }
+
+    // --- Krank/Urlaub ---
+
+    #[test]
+    fn a_marked_weekday_counts_the_daily_target() {
+        assert_eq!(absence_minutes(DAY, "2026-11-16", &[]), 480);
+        assert_eq!(absence_minutes(DAY, "2026-11-20", &[]), 480);
+        assert_eq!(absence_minutes(360, "2026-11-18", &[]), 360);
+    }
+
+    #[test]
+    fn a_marked_holiday_counts_nothing() {
+        assert_eq!(absence_minutes(DAY, "2026-12-25", &[holiday("2026-12-25")]), 0);
+        assert_eq!(absence_minutes(DAY, "2026-12-24", &[holiday("2026-12-25")]), 480, "nur der Feiertag selbst");
+    }
+
+    #[test]
+    fn a_marked_weekend_day_counts_nothing() {
+        assert_eq!(absence_minutes(DAY, "2026-11-21", &[]), 0);
+        assert_eq!(absence_minutes(DAY, "2026-11-22", &[]), 0);
+    }
+
+    #[test]
+    fn vacation_and_sick_day_with_three_worked_days_balance_to_zero() {
+        let (_dir, mut store) = open_temp();
+        store.save_holidays("2026-11-02", "2026-11-29", &[]).unwrap();
+        store.save_absence("2026-11-16", Absence::Vacation).unwrap();
+        store.save_absence("2026-11-17", Absence::Sick).unwrap();
+        for date in ["2026-11-18", "2026-11-19", "2026-11-20"] {
+            store.save(date, "08:00", "16:30", 30.0).unwrap();
+        }
+        assert_eq!(
+            week_summary(&store, DAY, "2026-11-16").unwrap(),
+            WeekSummary { actual_minutes: 2400, target_minutes: 2400, balance_minutes: 0, target_incomplete: false }
+        );
+    }
+
+    #[test]
+    fn removing_a_marking_takes_its_hours_out_of_the_actual() {
+        let (_dir, mut store) = open_temp();
+        store.save_holidays("2026-11-02", "2026-11-29", &[]).unwrap();
+        store.save_absence("2026-11-16", Absence::Vacation).unwrap();
+        assert_eq!(week_summary(&store, DAY, "2026-11-16").unwrap().actual_minutes, 480);
+        store.delete("2026-11-16").unwrap();
+        let summary = week_summary(&store, DAY, "2026-11-16").unwrap();
+        assert_eq!((summary.actual_minutes, summary.target_minutes, summary.balance_minutes), (0, 2400, -2400));
+    }
+
+    #[test]
+    fn a_marked_holiday_changes_neither_actual_nor_target() {
+        let (_dir, mut store) = open_temp();
+        store.save_holidays("2026-12-21", "2026-12-27", &[holiday("2026-12-25")]).unwrap();
+        let before = week_summary(&store, DAY, "2026-12-21").unwrap();
+        store.save_absence("2026-12-25", Absence::Vacation).unwrap();
+        assert_eq!(week_summary(&store, DAY, "2026-12-21").unwrap(), before);
+        assert_eq!(before.target_minutes, 1920);
+    }
+
+    #[test]
+    fn a_marked_weekend_changes_neither_actual_nor_target() {
+        let (_dir, mut store) = open_temp();
+        store.save_holidays("2026-11-02", "2026-11-29", &[]).unwrap();
+        store.save_absence("2026-11-21", Absence::Sick).unwrap();
+        store.save_absence("2026-11-22", Absence::Vacation).unwrap();
+        let summary = week_summary(&store, DAY, "2026-11-16").unwrap();
+        assert_eq!((summary.actual_minutes, summary.target_minutes), (0, 2400));
+    }
+
+    #[test]
+    fn vacation_entered_before_its_holidays_were_loaded_follows_the_loaded_holidays() {
+        let (_dir, mut store) = open_temp();
+        for date in ["2027-03-29", "2027-03-30", "2027-03-31", "2027-04-01", "2027-04-02"] {
+            store.save_absence(date, Absence::Vacation).unwrap();
+        }
+        let before = week_summary(&store, DAY, "2027-03-29").unwrap();
+        assert_eq!(
+            before,
+            WeekSummary { actual_minutes: 2400, target_minutes: 2400, balance_minutes: 0, target_incomplete: true }
+        );
+        store.save_holidays("2027-03-29", "2027-04-04", &[holiday("2027-03-29"), holiday("2027-04-02")]).unwrap();
+        assert_eq!(
+            week_summary(&store, DAY, "2027-03-29").unwrap(),
+            WeekSummary { actual_minutes: 1440, target_minutes: 1440, balance_minutes: 0, target_incomplete: false }
+        );
+    }
+
+    #[test]
+    fn marking_a_day_of_a_frozen_week_keeps_its_frozen_target() {
+        let (_dir, mut store) = open_temp();
+        store.save_holidays("2026-11-02", "2026-11-29", &[holiday("2026-11-18")]).unwrap();
+        freeze_past_weeks(&store, DAY, date("2026-11-30")).unwrap();
+        store.save_absence("2026-11-16", Absence::Sick).unwrap();
+        let summary = week_summary(&store, DAY, "2026-11-16").unwrap();
+        assert_eq!((summary.actual_minutes, summary.target_minutes), (480, 1920));
+    }
+
+    #[test]
+    fn day_entries_credit_marked_days_and_keep_worked_days() {
+        let (_dir, mut store) = open_temp();
+        store.save_holidays("2026-12-21", "2026-12-27", &[holiday("2026-12-25")]).unwrap();
+        store.save("2026-12-21", "08:00", "12:00", 0.0).unwrap();
+        store.save_absence("2026-12-22", Absence::Sick).unwrap();
+        store.save_absence("2026-12-25", Absence::Vacation).unwrap();
+        store.save_absence("2026-12-26", Absence::Vacation).unwrap();
+        let credited: Vec<(String, Kind, u32)> = day_entries(&store, DAY, "2026-12-21", "2026-12-27")
+            .unwrap()
+            .into_iter()
+            .map(|entry| (entry.date, entry.kind, entry.minutes))
+            .collect();
+        assert_eq!(
+            credited,
+            vec![
+                ("2026-12-21".to_string(), Kind::Work, 240),
+                ("2026-12-22".to_string(), Kind::Sick, 480),
+                ("2026-12-25".to_string(), Kind::Vacation, 0),
+                ("2026-12-26".to_string(), Kind::Vacation, 0),
+            ]
+        );
+    }
+
+    #[test]
+    fn marking_returns_the_credited_minutes() {
+        let (_dir, mut store) = open_temp();
+        store.save_holidays("2026-12-21", "2026-12-27", &[holiday("2026-12-25")]).unwrap();
+        assert_eq!(mark_absence(&store, DAY, "2026-12-24", Absence::Sick).unwrap(), 480);
+        assert_eq!(mark_absence(&store, DAY, "2026-12-25", Absence::Vacation).unwrap(), 0);
+        assert_eq!(mark_absence(&store, DAY, "2026-12-26", Absence::Vacation).unwrap(), 0);
+        assert!(matches!(mark_absence(&store, DAY, "morgen", Absence::Sick), Err(StoreError::InvalidDate)));
     }
 
     // --- freeze_past_weeks ---

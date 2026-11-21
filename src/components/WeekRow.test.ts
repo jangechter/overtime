@@ -178,7 +178,7 @@ describe("WeekRow", () => {
   });
 
   it("zeigt einen gespeicherten Eintrag mit Eingaben und Stunden", () => {
-    const entry = { start: "08:00", end: "16:30", breakMinutes: 30, minutes: 480 };
+    const entry = { kind: "work" as const, start: "08:00", end: "16:30", breakMinutes: 30, minutes: 480 };
     const wrapper = mount(WeekRow, { props: { date: "2026-11-16", entry } });
     expect((wrapper.get('[data-test="start"]').element as HTMLInputElement).value).toBe("08:00");
     expect((wrapper.get('[data-test="end"]').element as HTMLInputElement).value).toBe("16:30");
@@ -188,7 +188,7 @@ describe("WeekRow", () => {
   });
 
   it("löscht den gespeicherten Eintrag, wenn das Ende geleert wird", async () => {
-    const entry = { start: "08:00", end: "16:30", breakMinutes: 30, minutes: 480 };
+    const entry = { kind: "work" as const, start: "08:00", end: "16:30", breakMinutes: 30, minutes: 480 };
     const wrapper = mount(WeekRow, { props: { date: "2026-11-16", entry } });
     await wrapper.get('[data-test="end"]').setValue("");
     await flushPromises();
@@ -209,12 +209,210 @@ describe("WeekRow", () => {
     backend = async () => {
       throw "Das Ende muss nach dem Start liegen.";
     };
-    const entry = { start: "08:00", end: "16:30", breakMinutes: 30, minutes: 480 };
+    const entry = { kind: "work" as const, start: "08:00", end: "16:30", breakMinutes: 30, minutes: 480 };
     const wrapper = mount(WeekRow, { props: { date: "2026-11-16", entry } });
     await wrapper.get('[data-test="end"]').setValue("07:00");
     await flushPromises();
     expect(wrapper.get('[data-test="error"]').text()).toBe(
       "Das Ende muss nach dem Start liegen. Der zuletzt gespeicherte Eintrag bleibt erhalten.",
     );
+  });
+
+  describe("Krank/Urlaub", () => {
+    const select = (wrapper: ReturnType<typeof mount>) => wrapper.get('[data-test="kind"]');
+    const kindOf = (wrapper: ReturnType<typeof mount>) => (select(wrapper).element as HTMLSelectElement).value;
+
+    it("bietet Arbeit, Krank und Urlaub zur Auswahl, voreingestellt ist Arbeit", () => {
+      const wrapper = mount(WeekRow, { props: { date: "2026-11-16" } });
+      expect(select(wrapper).findAll("option").map((option) => option.text())).toEqual(["Arbeit", "Krank", "Urlaub"]);
+      expect(kindOf(wrapper)).toBe("work");
+      expect(wrapper.find('[data-test="start"]').exists()).toBe(true);
+    });
+
+    it("markiert einen Tag als krank, blendet die Zeiten aus und zeigt die angerechneten Stunden", async () => {
+      backend = async () => 480;
+      const wrapper = mount(WeekRow, { props: { date: "2026-11-16" } });
+      await select(wrapper).setValue("sick");
+      await flushPromises();
+      expect(calls).toEqual([["mark_absence", { date: "2026-11-16", kind: "sick" }]]);
+      expect(wrapper.find('[data-test="start"]').exists()).toBe(false);
+      expect(wrapper.find('[data-test="end"]').exists()).toBe(false);
+      expect(wrapper.find('[data-test="break"]').exists()).toBe(false);
+      expect(wrapper.get('[data-test="hours"]').text()).toBe("8:00 h");
+      expect(wrapper.emitted("saved")).toHaveLength(1);
+    });
+
+    it("zeigt die Stunden, die das Backend anrechnet, z. B. 0:00 h an einem Feiertag", async () => {
+      backend = async () => 0;
+      const wrapper = mount(WeekRow, { props: { date: "2026-12-25", holiday: "1. Weihnachtsfeiertag" } });
+      await select(wrapper).setValue("vacation");
+      await flushPromises();
+      expect(wrapper.get('[data-test="hours"]').text()).toBe("0:00 h");
+    });
+
+    it("speichert beim Zurückwechseln auf Arbeit die zuvor eingetragenen Zeiten wieder", async () => {
+      backend = async () => 480;
+      const entry = { kind: "work" as const, start: "08:00", end: "16:30", breakMinutes: 30, minutes: 480 };
+      const wrapper = mount(WeekRow, { props: { date: "2026-11-16", entry } });
+      await select(wrapper).setValue("sick");
+      await flushPromises();
+      await select(wrapper).setValue("work");
+      await flushPromises();
+      expect(calls).toEqual([
+        ["mark_absence", { date: "2026-11-16", kind: "sick" }],
+        ["save_entry", { date: "2026-11-16", start: "08:00", end: "16:30", breakMinutes: 30 }],
+      ]);
+      expect((wrapper.get('[data-test="start"]').element as HTMLInputElement).value).toBe("08:00");
+      expect(wrapper.get('[data-test="hours"]').text()).toBe("8:00 h");
+    });
+
+    it("behält nach einem fehlgeschlagenen Markieren die Zeiten und löscht beim Zurückwechseln nichts", async () => {
+      backend = async (command) => {
+        if (command === "mark_absence") throw "Die Datenbank konnte nicht gelesen oder geschrieben werden. Bitte die App neu starten.";
+        return 480;
+      };
+      const entry = { kind: "work" as const, start: "08:00", end: "16:30", breakMinutes: 30, minutes: 480 };
+      const wrapper = mount(WeekRow, { props: { date: "2026-11-16", entry } });
+      await select(wrapper).setValue("sick");
+      await flushPromises();
+      expect(wrapper.get('[data-test="error"]').text()).toContain("Der zuletzt gespeicherte Eintrag bleibt erhalten.");
+      await select(wrapper).setValue("work");
+      await flushPromises();
+      expect(calls.some(([command]) => command === "delete_entry")).toBe(false);
+      expect(calls[calls.length - 1]).toEqual(["save_entry", { date: "2026-11-16", start: "08:00", end: "16:30", breakMinutes: 30 }]);
+      expect(wrapper.get('[data-test="hours"]').text()).toBe("8:00 h");
+      expect(wrapper.find('[data-test="error"]').exists()).toBe(false);
+    });
+
+    it("weist darauf hin, dass die Markierung erhalten bleibt, wenn das Entfernen fehlschlägt", async () => {
+      backend = async () => {
+        throw "Die Datenbank konnte nicht gelesen oder geschrieben werden. Bitte die App neu starten.";
+      };
+      const entry = { kind: "sick" as const, start: null, end: null, breakMinutes: null, minutes: 480 };
+      const wrapper = mount(WeekRow, { props: { date: "2026-11-16", entry } });
+      await select(wrapper).setValue("work");
+      await flushPromises();
+      expect(wrapper.get('[data-test="error"]').text()).toBe(
+        "Die Datenbank konnte nicht gelesen oder geschrieben werden. Bitte die App neu starten. Der zuletzt gespeicherte Eintrag bleibt erhalten.",
+      );
+      expect(wrapper.emitted("saved")).toBeUndefined();
+    });
+
+    it("löscht die Markierung auch, wenn schon vor der Antwort auf das Markieren wieder Arbeit gewählt wird", async () => {
+      const marks: Array<(minutes: number) => void> = [];
+      backend = (command) =>
+        command === "mark_absence"
+          ? new Promise((resolve) => marks.push(resolve as (minutes: number) => void))
+          : Promise.resolve(undefined);
+      const wrapper = mount(WeekRow, { props: { date: "2026-11-16" } });
+      await select(wrapper).setValue("sick");
+      await flushPromises();
+      await select(wrapper).setValue("work");
+      await flushPromises();
+      expect(calls).toEqual([
+        ["mark_absence", { date: "2026-11-16", kind: "sick" }],
+        ["delete_entry", { date: "2026-11-16" }],
+      ]);
+      marks[0](480);
+      await flushPromises();
+      expect(wrapper.find('[data-test="hours"]').exists()).toBe(false);
+    });
+
+    it("löscht auch einen Arbeitseintrag, dessen Speichern noch läuft, wenn das Ende geleert wird", async () => {
+      const saves: Array<(minutes: number) => void> = [];
+      backend = (command) =>
+        command === "save_entry"
+          ? new Promise((resolve) => saves.push(resolve as (minutes: number) => void))
+          : Promise.resolve(undefined);
+      const wrapper = mount(WeekRow, { props: { date: "2026-11-16" } });
+      await fill(wrapper, "08:00", "16:30", "30");
+      await wrapper.get('[data-test="end"]').setValue("");
+      await flushPromises();
+      expect(calls[calls.length - 1]).toEqual(["delete_entry", { date: "2026-11-16" }]);
+      saves.forEach((resolve) => resolve(480));
+      await flushPromises();
+    });
+
+    it("ersetzt eingetragene Zeiten durch die Markierung Urlaub, ohne sie zu löschen oder neu zu speichern", async () => {
+      backend = async () => 480;
+      const wrapper = mount(WeekRow, { props: { date: "2026-11-16" } });
+      await fill(wrapper, "08:00", "16:30", "30");
+      calls.length = 0;
+      await select(wrapper).setValue("vacation");
+      await flushPromises();
+      expect(calls).toEqual([["mark_absence", { date: "2026-11-16", kind: "vacation" }]]);
+    });
+
+    it("zeigt einen gespeicherten Urlaubstag mit Auswahl und Stunden, ohne das Backend zu fragen", () => {
+      const entry = { kind: "vacation" as const, start: null, end: null, breakMinutes: null, minutes: 480 };
+      const wrapper = mount(WeekRow, { props: { date: "2026-11-16", entry } });
+      expect(kindOf(wrapper)).toBe("vacation");
+      expect(wrapper.find('[data-test="start"]').exists()).toBe(false);
+      expect(wrapper.get('[data-test="hours"]').text()).toBe("8:00 h");
+      expect(calls).toEqual([]);
+    });
+
+    it("entfernt die Markierung, wenn wieder Arbeit gewählt wird, und zeigt leere Felder", async () => {
+      const entry = { kind: "sick" as const, start: null, end: null, breakMinutes: null, minutes: 480 };
+      const wrapper = mount(WeekRow, { props: { date: "2026-11-16", entry } });
+      await select(wrapper).setValue("work");
+      await flushPromises();
+      expect(calls).toEqual([["delete_entry", { date: "2026-11-16" }]]);
+      expect(wrapper.emitted("saved")).toHaveLength(1);
+      expect(wrapper.find('[data-test="hours"]').exists()).toBe(false);
+      expect((wrapper.get('[data-test="start"]').element as HTMLInputElement).value).toBe("");
+      expect((wrapper.get('[data-test="end"]').element as HTMLInputElement).value).toBe("");
+    });
+
+    it("wechselt direkt von Krank zu Urlaub", async () => {
+      backend = async () => 480;
+      const entry = { kind: "sick" as const, start: null, end: null, breakMinutes: null, minutes: 480 };
+      const wrapper = mount(WeekRow, { props: { date: "2026-11-16", entry } });
+      await select(wrapper).setValue("vacation");
+      await flushPromises();
+      expect(calls).toEqual([["mark_absence", { date: "2026-11-16", kind: "vacation" }]]);
+    });
+
+    it("zeigt die Meldung des Backends, wenn das Markieren fehlschlägt", async () => {
+      backend = async () => {
+        throw "Die Datenbank konnte nicht gelesen oder geschrieben werden. Bitte die App neu starten.";
+      };
+      const wrapper = mount(WeekRow, { props: { date: "2026-11-16" } });
+      await select(wrapper).setValue("sick");
+      await flushPromises();
+      expect(wrapper.get('[data-test="error"]').text()).toBe(
+        "Die Datenbank konnte nicht gelesen oder geschrieben werden. Bitte die App neu starten.",
+      );
+      expect(wrapper.find('[data-test="hours"]').exists()).toBe(false);
+      expect(wrapper.emitted("saved")).toBeUndefined();
+    });
+
+    it("übernimmt neu angerechnete Stunden, wenn der gespeicherte Eintrag neu geladen wird", async () => {
+      const entry = { kind: "vacation" as const, start: null, end: null, breakMinutes: null, minutes: 480 };
+      const wrapper = mount(WeekRow, { props: { date: "2027-03-29", entry } });
+      await wrapper.setProps({ entry: { ...entry, minutes: 0 } });
+      expect(wrapper.get('[data-test="hours"]').text()).toBe("0:00 h");
+      expect(calls).toEqual([]);
+    });
+
+    it("lässt einen Arbeitstag unverändert, wenn sein Eintrag neu geladen wird", async () => {
+      const entry = { kind: "work" as const, start: "08:00", end: "16:30", breakMinutes: 30, minutes: 480 };
+      const wrapper = mount(WeekRow, { props: { date: "2026-11-16", entry } });
+      await wrapper.setProps({ entry: { ...entry, end: "12:00", minutes: 240 } });
+      await flushPromises();
+      expect((wrapper.get('[data-test="end"]').element as HTMLInputElement).value).toBe("16:30");
+      expect(wrapper.get('[data-test="hours"]').text()).toBe("8:00 h");
+      expect(calls).toEqual([]);
+    });
+
+    it("übernimmt keine Stunden eines neu geladenen Eintrags, dessen Art inzwischen geändert wurde", async () => {
+      backend = async () => 480;
+      const entry = { kind: "vacation" as const, start: null, end: null, breakMinutes: null, minutes: 480 };
+      const wrapper = mount(WeekRow, { props: { date: "2026-11-16", entry } });
+      await select(wrapper).setValue("sick");
+      await flushPromises();
+      await wrapper.setProps({ entry: { ...entry, minutes: 0 } });
+      expect(wrapper.get('[data-test="hours"]').text()).toBe("8:00 h");
+    });
   });
 });

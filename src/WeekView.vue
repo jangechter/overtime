@@ -47,12 +47,26 @@ function showHolidays(week: WeekHolidays) {
   holidaysMissing.value = week.missing;
 }
 
-/** Liest die Feiertage der angezeigten Woche neu, ohne die Zeilen anzufassen. */
+type DayEntry = StoredEntry & { date: string };
+
+function fetchEntries(): Promise<DayEntry[]> {
+  return invoke<DayEntry[]>("load_entries", { from: days.value[0], to: days.value[6] });
+}
+
+function showEntries(rows: DayEntry[]) {
+  entries.value = Object.fromEntries(rows.map((row) => [row.date, row]));
+}
+
+/** Liest Feiertage und Einträge der angezeigten Woche neu, ohne die Zeilen neu aufzubauen. Die Einträge werden
+ *  mitgelesen, weil das Backend Krank/Urlaub an einem Feiertag mit 0 h anrechnet. */
 async function reloadHolidays() {
   const weekStart = days.value[0];
   try {
-    const week = await fetchHolidays();
-    if (days.value[0] === weekStart) showHolidays(week);
+    const [week, rows] = await Promise.all([fetchHolidays(), fetchEntries()]);
+    if (days.value[0] === weekStart) {
+      showHolidays(week);
+      showEntries(rows);
+    }
   } catch (e) {
     loadError.value = String(e);
     return;
@@ -84,16 +98,9 @@ async function loadWeek() {
   weekFetchError.value = "";
   holidaysMissing.value = false;
   try {
-    const [rows, week, weekSummary] = await Promise.all([
-      invoke<Array<StoredEntry & { date: string }>>("load_entries", {
-        from: days.value[0],
-        to: days.value[6],
-      }),
-      fetchHolidays(),
-      fetchSummary(),
-    ]);
+    const [rows, week, weekSummary] = await Promise.all([fetchEntries(), fetchHolidays(), fetchSummary()]);
     if (request !== latestRequest) return;
-    entries.value = Object.fromEntries(rows.map((row) => [row.date, row]));
+    showEntries(rows);
     showHolidays(week);
     latestSummaryRequest++;
     summary.value = weekSummary;

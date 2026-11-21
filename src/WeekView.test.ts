@@ -41,7 +41,7 @@ describe("WeekView", () => {
 
   it("lädt die Einträge der aktuellen Woche und trägt sie in die Zeilen ein", async () => {
     const week = currentWeek();
-    backend = onlyEntries(async () => [{ date: week[2], start: "08:00", end: "16:30", breakMinutes: 30, minutes: 480 }]);
+    backend = onlyEntries(async () => [{ date: week[2], kind: "work", start: "08:00", end: "16:30", breakMinutes: 30, minutes: 480 }]);
     const wrapper = mount(WeekView);
     await flushPromises();
     expect(calls[0]).toEqual(["load_entries", { from: week[0], to: week[6] }]);
@@ -74,7 +74,7 @@ describe("WeekView", () => {
     const week = currentWeek();
     const previous = shiftWeek(week, -1);
     backend = onlyEntries(async (from) =>
-      from === week[0] ? [{ date: week[1], start: "08:00", end: "16:30", breakMinutes: 30, minutes: 480 }] : [],
+      from === week[0] ? [{ date: week[1], kind: "work", start: "08:00", end: "16:30", breakMinutes: 30, minutes: 480 }] : [],
     );
     const wrapper = mount(WeekView);
     await flushPromises();
@@ -104,7 +104,7 @@ describe("WeekView", () => {
     await wrapper.get('[data-test="prev"]').trigger("click");
     await wrapper.get('[data-test="prev"]').trigger("click");
     const twoBack = shiftWeek(week, -2);
-    pending[1]([{ date: twoBack[3], start: "09:00", end: "17:00", breakMinutes: 0, minutes: 480 }]);
+    pending[1]([{ date: twoBack[3], kind: "work", start: "09:00", end: "17:00", breakMinutes: 0, minutes: 480 }]);
     await flushPromises();
     pending[0]([]);
     await flushPromises();
@@ -128,7 +128,7 @@ describe("WeekView", () => {
   it("springt mit „Heute“ aus einer anderen Woche zurück in die aktuelle Woche", async () => {
     const week = currentWeek();
     backend = onlyEntries(async (from) =>
-      from === week[0] ? [{ date: week[1], start: "08:00", end: "16:30", breakMinutes: 30, minutes: 480 }] : [],
+      from === week[0] ? [{ date: week[1], kind: "work", start: "08:00", end: "16:30", breakMinutes: 30, minutes: 480 }] : [],
     );
     const wrapper = mount(WeekView);
     await flushPromises();
@@ -366,6 +366,57 @@ describe("WeekView", () => {
       await flushPromises();
       expect(wrapper.get('[data-test="week-target"]').text()).toContain("32:00 h");
       expect(wrapper.find('[data-test="target-incomplete"]').exists()).toBe(false);
+    });
+
+    it("frischt nach dem Nachladen der Feiertage die angerechneten Stunden eines Urlaubstags auf", async () => {
+      const week = currentWeek();
+      let fetched = false;
+      backend = (command) => {
+        if (command === "fetch_week_holidays") {
+          fetched = true;
+          return Promise.resolve(undefined);
+        }
+        if (command === "load_holidays") {
+          return Promise.resolve(fetched ? holidayAnswer([{ date: week[0], name: "Ostermontag" }]) : holidayAnswer([], true));
+        }
+        if (command === "load_entries") {
+          return Promise.resolve([
+            { date: week[0], kind: "vacation", start: null, end: null, breakMinutes: null, minutes: fetched ? 0 : 480 },
+          ]);
+        }
+        if (command === "week_summary") {
+          return Promise.resolve(fetched ? summaryAnswer(0, 1920, false) : summaryAnswer(480, 2400, true));
+        }
+        return answer(command);
+      };
+      const wrapper = mount(WeekView);
+      await flushPromises();
+      const monday = () => wrapper.findAll(".week-row")[0];
+      expect(monday().get('[data-test="hours"]').text()).toBe("8:00 h");
+
+      await wrapper.get('[data-test="load-holidays"]').trigger("click");
+      await flushPromises();
+      expect(monday().get('[data-test="holiday"]').text()).toBe("Ostermontag");
+      expect(monday().get('[data-test="hours"]').text()).toBe("0:00 h");
+      expect(wrapper.get('[data-test="week-total"]').text()).toContain("0:00 h");
+    });
+
+    it("zieht Ist und Saldo nach, wenn ein Tag als Urlaub markiert wird", async () => {
+      let marked = false;
+      backend = (command) => {
+        if (command === "mark_absence") {
+          marked = true;
+          return Promise.resolve(480);
+        }
+        if (command === "week_summary") return Promise.resolve(summaryAnswer(marked ? 480 : 0));
+        return answer(command);
+      };
+      const wrapper = mount(WeekView);
+      await flushPromises();
+      await wrapper.findAll('[data-test="kind"]')[0].setValue("vacation");
+      await flushPromises();
+      expect(wrapper.get('[data-test="week-total"]').text()).toContain("8:00 h");
+      expect(wrapper.get('[data-test="week-balance"]').text()).toContain("−32:00 h");
     });
 
     it("liest das Soll nach dem Abruf beim Start neu", async () => {

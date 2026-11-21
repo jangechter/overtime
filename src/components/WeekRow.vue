@@ -3,10 +3,14 @@ import { computed, onUnmounted, ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { formatHours } from "../week";
 
+export type Kind = "work" | "sick" | "vacation";
+
+/** Gespeicherter Tag. Bei Krank/Urlaub sind die Zeiten leer und `minutes` sind die vom Backend angerechneten Minuten. */
 export interface StoredEntry {
-  start: string;
-  end: string;
-  breakMinutes: number;
+  kind: Kind;
+  start: string | null;
+  end: string | null;
+  breakMinutes: number | null;
   minutes: number;
 }
 
@@ -24,6 +28,7 @@ const emit = defineEmits<{
   saved: [];
 }>();
 
+const kind = ref<Kind>(props.entry?.kind ?? "work");
 const start = ref(props.entry?.start ?? "");
 const end = ref(props.entry?.end ?? "");
 const breakMinutes = ref(props.entry?.breakMinutes ?? 0);
@@ -43,21 +48,51 @@ const dateLabel = computed(() =>
 const hoursLabel = computed(() => (minutes.value === null ? "" : formatHours(minutes.value)));
 
 let latestRequest = 0;
+/** Laufende schreibende Befehle. Solange einer läuft, kann der Tag schon gespeichert sein, obwohl `stored` noch false ist. */
+let writesInFlight = 0;
 
-watch([start, end, breakMinutes], async () => {
+async function write<T>(command: string, args: Record<string, unknown>): Promise<T> {
+  writesInFlight++;
+  try {
+    return await invoke<T>(command, args);
+  } finally {
+    writesInFlight--;
+  }
+}
+
+// Die angerechneten Minuten von Krank/Urlaub hängen von den Feiertagen ab; nach neu geladenen Feiertagen kommen sie über `entry`.
+watch(
+  () => props.entry,
+  (entry) => {
+    if (entry && entry.kind !== "work" && entry.kind === kind.value) minutes.value = entry.minutes;
+  },
+);
+
+// Bei Krank/Urlaub bleiben die eingetragenen Zeiten in der Zeile (ausgeblendet) erhalten: Das Backend ersetzt den Eintrag,
+// zurück auf „Arbeit“ werden sie wieder gespeichert. Schlägt das Markieren fehl, gehen sie so nicht verloren.
+watch([kind, start, end, breakMinutes], async () => {
   const request = ++latestRequest;
   try {
+    if (kind.value !== "work") {
+      const result = await write<number>("mark_absence", { date: props.date, kind: kind.value });
+      stored = true;
+      emit("saved");
+      if (request !== latestRequest) return;
+      minutes.value = result;
+      error.value = "";
+      return;
+    }
     if (!start.value || !end.value) {
       minutes.value = null;
       error.value = "";
-      if (stored) {
-        await invoke("delete_entry", { date: props.date });
+      if (stored || writesInFlight > 0) {
+        await write("delete_entry", { date: props.date });
         stored = false;
         emit("saved");
       }
       return;
     }
-    const result = await invoke<number>("save_entry", {
+    const result = await write<number>("save_entry", {
       date: props.date,
       start: start.value,
       end: end.value,
@@ -89,9 +124,16 @@ watch([start, end, breakMinutes], async () => {
       <span>{{ dateLabel }}</span>
     </div>
     <span v-if="holiday" class="holiday" data-test="holiday">{{ holiday }}</span>
-    <label>Start <input v-model="start" type="text" inputmode="numeric" placeholder="HH:MM" maxlength="5" data-test="start" /></label>
-    <label>Ende <input v-model="end" type="text" inputmode="numeric" placeholder="HH:MM" maxlength="5" data-test="end" /></label>
-    <label>Pause (Min) <input v-model="breakMinutes" type="number" min="0" data-test="break" /></label>
+    <select v-model="kind" aria-label="Art des Tages" data-test="kind">
+      <option value="work">Arbeit</option>
+      <option value="sick">Krank</option>
+      <option value="vacation">Urlaub</option>
+    </select>
+    <template v-if="kind === 'work'">
+      <label>Start <input v-model="start" type="text" inputmode="numeric" placeholder="HH:MM" maxlength="5" data-test="start" /></label>
+      <label>Ende <input v-model="end" type="text" inputmode="numeric" placeholder="HH:MM" maxlength="5" data-test="end" /></label>
+      <label>Pause (Min) <input v-model="breakMinutes" type="number" min="0" data-test="break" /></label>
+    </template>
     <span v-if="minutes !== null" class="hours" data-test="hours">{{ hoursLabel }}</span>
     <span v-if="error" class="error" data-test="error">{{ error }}</span>
   </div>
