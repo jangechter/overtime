@@ -192,6 +192,14 @@ select:focus-visible {
   color: var(--color-text-muted);
 }
 
+/* Dezimalstunden in Klammern hinter einer Zeit im Format H:MM, kleiner und zurückgenommen. */
+.decimal {
+  font-size: 0.75em;
+  font-weight: 500;
+  color: var(--color-text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
 /* Hinweiszeile für Fehler, Warnungen und Infos (z. B. über der Wochenübersicht). */
 .notice {
   display: flex;

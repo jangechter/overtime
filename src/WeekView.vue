@@ -2,7 +2,7 @@
 import { computed, onMounted, ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import WeekRow, { type StoredEntry } from "./components/WeekRow.vue";
-import { currentWeek, formatBalance, formatHours, shiftWeek } from "./week";
+import { currentWeek, formatBalance, formatDecimalBalance, formatDecimalHours, formatHours, shiftWeek } from "./week";
 
 const days = ref(currentWeek());
 const entries = ref<Record<string, StoredEntry>>({});
@@ -228,19 +228,26 @@ onMounted(() => {
         />
       </div>
       <section class="summary">
-        <!-- Beschriftung und Wert in einer Zeile, damit der Text dazwischen ein Leerzeichen behält (Screenreader). -->
+        <!-- Leerzeichen zwischen Beschriftung und Wert auf derselben Zeile, das vor den Dezimalstunden in ihrer Spanne:
+             Zeilenumbrüche zwischen Elementen entfernt Vue, der Text bliebe sonst ohne Leerzeichen (Screenreader). -->
         <p class="tile card" data-test="week-total">
-          <span class="tile-label">Wochensumme</span> <span class="tile-value">{{ formatHours(summary.actualMinutes) }}</span>
+          <span class="tile-label">Wochensumme</span> <span class="tile-value">
+            {{ formatHours(summary.actualMinutes) }}<span class="decimal"> ({{ formatDecimalHours(summary.actualMinutes) }})</span>
+          </span>
         </p>
         <p class="tile card" data-test="week-target">
-          <span class="tile-label">Soll</span> <span class="tile-value">{{ formatHours(summary.targetMinutes) }}</span>
+          <span class="tile-label">Soll</span> <span class="tile-value">
+            {{ formatHours(summary.targetMinutes) }}<span class="decimal"> ({{ formatDecimalHours(summary.targetMinutes) }})</span>
+          </span>
         </p>
         <p
           class="tile card"
           data-test="week-balance"
           :class="{ negative: summary.balanceMinutes < 0, positive: summary.balanceMinutes > 0 }"
         >
-          <span class="tile-label">Saldo</span> <span class="tile-value">{{ formatBalance(summary.balanceMinutes) }}</span>
+          <span class="tile-label">Saldo</span> <span class="tile-value">
+            {{ formatBalance(summary.balanceMinutes) }}<span class="decimal"> ({{ formatDecimalBalance(summary.balanceMinutes) }})</span>
+          </span>
         </p>
         <p v-if="summary.targetIncomplete" class="notice warning" data-test="target-incomplete">
           Das Soll ist ohne Feiertagsabzug berechnet, weil für diese Woche Feiertage fehlen.

@@ -49,21 +49,21 @@ describe("MonthView", () => {
     backend = async () => monthAnswer(9360, 492, 19);
     const { wrapper } = mountInKeepAlive();
     await flushPromises();
-    expect(text(wrapper, "month-total")).toBe("Monatssumme 156:00 h");
-    expect(text(wrapper, "month-average")).toBe("Durchschnitt pro Arbeitstag 8:12 h an 19 Arbeitstagen");
+    expect(text(wrapper, "month-total")).toBe("Monatssumme 156:00 h (156,00 h)");
+    expect(text(wrapper, "month-average")).toBe("Durchschnitt pro Arbeitstag 8:12 h (8,20 h) an 19 Arbeitstagen");
   });
 
   it("schreibt einen einzelnen Arbeitstag in der Einzahl", async () => {
     backend = async () => monthAnswer(480, 480, 1);
     const { wrapper } = mountInKeepAlive();
     await flushPromises();
-    expect(text(wrapper, "month-average")).toBe("Durchschnitt pro Arbeitstag 8:00 h an 1 Arbeitstag");
+    expect(text(wrapper, "month-average")).toBe("Durchschnitt pro Arbeitstag 8:00 h (8,00 h) an 1 Arbeitstag");
   });
 
   it("zeigt für einen Monat ohne Arbeitstag keinen Durchschnitt", async () => {
     const { wrapper } = mountInKeepAlive();
     await flushPromises();
-    expect(text(wrapper, "month-total")).toBe("Monatssumme 0:00 h");
+    expect(text(wrapper, "month-total")).toBe("Monatssumme 0:00 h (0,00 h)");
     expect(text(wrapper, "month-average")).toBe("Durchschnitt pro Arbeitstag – kein Arbeitstag mit Eintrag");
   });
 
@@ -133,7 +133,7 @@ describe("MonthView", () => {
     await flushPromises();
     pending[0](monthAnswer(9999, 480, 20));
     await flushPromises();
-    expect(text(wrapper, "month-total")).toBe("Monatssumme 4:00 h");
+    expect(text(wrapper, "month-total")).toBe("Monatssumme 4:00 h (4,00 h)");
   });
 
   it("zeigt keinen Fehler einer überholten Anfrage", async () => {
@@ -148,7 +148,7 @@ describe("MonthView", () => {
     pending[0].reject("Veralteter Fehler");
     await flushPromises();
     expect(wrapper.find('[data-test="month-error"]').exists()).toBe(false);
-    expect(text(wrapper, "month-total")).toBe("Monatssumme 4:00 h");
+    expect(text(wrapper, "month-total")).toBe("Monatssumme 4:00 h (4,00 h)");
   });
 
   it("blendet einen Ladefehler aus, sobald der Monat wieder gelesen werden kann", async () => {
@@ -161,7 +161,7 @@ describe("MonthView", () => {
     await wrapper.get('[data-test="next-month"]').trigger("click");
     await flushPromises();
     expect(wrapper.find('[data-test="month-error"]').exists()).toBe(false);
-    expect(text(wrapper, "month-total")).toBe("Monatssumme 8:00 h");
+    expect(text(wrapper, "month-total")).toBe("Monatssumme 8:00 h (8,00 h)");
   });
 
   it("zeigt beim Blättern keine Zahlen des vorherigen Monats, solange der neue lädt", async () => {
@@ -185,6 +185,6 @@ describe("MonthView", () => {
     shown.value = true;
     await flushPromises();
     expect(calls[calls.length - 1]).toEqual(["month_summary", { date: shiftMonth(currentMonth(), -1) }]);
-    expect(text(wrapper, "month-total")).toBe("Monatssumme 8:00 h");
+    expect(text(wrapper, "month-total")).toBe("Monatssumme 8:00 h (8,00 h)");
   });
 });

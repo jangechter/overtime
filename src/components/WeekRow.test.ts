@@ -56,6 +56,14 @@ describe("WeekRow", () => {
     expect(wrapper.get('[data-test="hours"]').text()).toBe("8:00 h");
   });
 
+  it("zeigt die Tagesstunden zusätzlich als Dezimalstunden", async () => {
+    backend = async () => 510;
+    const wrapper = mount(WeekRow, { props: { date: "2026-11-16" } });
+    await fill(wrapper, "08:00", "17:00", "30");
+    expect(wrapper.get('[data-test="hours"]').text()).toBe("8:30 h");
+    expect(wrapper.get('[data-test="hours-decimal"]').text()).toBe("(8,50 h)");
+  });
+
   it("meldet nach dem Speichern, dass sich die Tagesstunden geändert haben", async () => {
     backend = async () => 480;
     const wrapper = mount(WeekRow, { props: { date: "2026-11-16" } });

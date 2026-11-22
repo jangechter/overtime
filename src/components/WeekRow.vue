@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onUnmounted, ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
-import { formatHours } from "../week";
+import { formatDecimalHours, formatHours } from "../week";
 
 export type Kind = "work" | "sick" | "vacation";
 
@@ -46,6 +46,7 @@ const dateLabel = computed(() =>
   parsed.value.toLocaleDateString("de-DE", { day: "2-digit", month: "2-digit", year: "numeric" }),
 );
 const hoursLabel = computed(() => (minutes.value === null ? "" : formatHours(minutes.value)));
+const decimalLabel = computed(() => (minutes.value === null ? "" : formatDecimalHours(minutes.value)));
 const isWeekend = computed(() => [0, 6].includes(parsed.value.getDay()));
 
 let latestRequest = 0;
@@ -135,7 +136,9 @@ watch([kind, start, end, breakMinutes], async () => {
       <label>Ende <input v-model="end" type="text" inputmode="numeric" placeholder="HH:MM" maxlength="5" data-test="end" /></label>
       <label>Pause (Min) <input v-model="breakMinutes" type="number" min="0" data-test="break" /></label>
     </template>
-    <span v-if="minutes !== null" class="hours" data-test="hours">{{ hoursLabel }}</span>
+    <span v-if="minutes !== null" class="hours">
+      <span data-test="hours">{{ hoursLabel }}</span> <span class="decimal" data-test="hours-decimal">({{ decimalLabel }})</span>
+    </span>
     <span v-if="error" class="error" data-test="error">{{ error }}</span>
   </div>
 </template>
@@ -164,5 +167,7 @@ label { display: flex; flex-direction: column; gap: 2px; font-size: 0.75rem; col
 label input { width: 100%; font-size: 0.95rem; color: var(--color-text); font-variant-numeric: tabular-nums; }
 /* Zeilenhöhe wie ein Eingabefeld, damit die Stunden mittig zu den Feldern stehen. */
 .hours { grid-column: -2; justify-self: end; line-height: 2rem; font-weight: 700; font-variant-numeric: tabular-nums; }
+/* Die Dezimalstunden werden abgetippt: in der Zeile größer als in den Kacheln. */
+.hours .decimal { font-size: 0.9em; }
 .error { grid-column: 1 / -1; margin-top: var(--space-2); font-size: 0.85rem; color: var(--color-danger); }
 </style>

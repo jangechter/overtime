@@ -26,6 +26,21 @@ export function formatHours(minutes: number): string {
   return `${formatDuration(minutes)} h`;
 }
 
+/**
+ * Minuten als Dezimalstunden mit zwei Nachkommastellen und Komma, kaufmännisch gerundet wie im CSV-Export
+ * (`format_hours` in `export.rs`): 510 → „8,50 h“, 481 → „8,02 h“.
+ */
+export function formatDecimalHours(minutes: number): string {
+  const hundredths = Math.floor((minutes * 100 + 30) / 60);
+  return `${Math.floor(hundredths / 100)},${pad(hundredths % 100)} h`;
+}
+
+/** Saldo als Dezimalstunden mit Vorzeichen: „+5,00 h“, „−0,25 h“ (Minuszeichen), ausgeglichen „0,00 h“. */
+export function formatDecimalBalance(minutes: number): string {
+  if (minutes === 0) return formatDecimalHours(0);
+  return `${minutes > 0 ? "+" : "−"}${formatDecimalHours(Math.abs(minutes))}`;
+}
+
 /** Saldo mit Vorzeichen: „+5:00 h“, „−5:00 h“ (Minuszeichen), ausgeglichen „0:00 h“. */
 export function formatBalance(minutes: number): string {
   if (minutes === 0) return formatHours(0);

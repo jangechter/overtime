@@ -2,7 +2,7 @@
 import { computed, onActivated, onDeactivated, ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { currentMonth, monthLabel, shiftMonth } from "./month";
-import { formatHours } from "./week";
+import { formatDecimalHours, formatHours } from "./week";
 
 /** Monatssumme und Durchschnitt in Minuten, berechnet im Backend. */
 interface MonthSummary {
@@ -29,12 +29,15 @@ const summary = ref<MonthSummary | null>(null);
 const loadError = ref("");
 let latestRequest = 0;
 
-/** Durchschnitt für die Kachel: der Wert groß, darunter die Zahl der gezählten Arbeitstage. */
+/** Durchschnitt für die Kachel: der Wert groß mit Dezimalstunden, darunter die Zahl der gezählten Arbeitstage. */
 const average = computed(() => {
   const days = summary.value?.countedDays ?? 0;
-  if (summary.value?.averageMinutes == null || days === 0) return { value: "–", detail: "kein Arbeitstag mit Eintrag" };
+  if (summary.value?.averageMinutes == null || days === 0) {
+    return { value: "–", decimal: null, detail: "kein Arbeitstag mit Eintrag" };
+  }
   return {
     value: formatHours(summary.value.averageMinutes),
+    decimal: formatDecimalHours(summary.value.averageMinutes),
     detail: `an ${days} ${days === 1 ? "Arbeitstag" : "Arbeitstagen"}`,
   };
 });
@@ -97,15 +100,20 @@ watch(
     <p v-if="loadError" class="notice error" role="alert" data-test="month-error">{{ loadError }}</p>
     <section v-if="summary" class="summary" aria-live="polite">
       <div class="tile card">
+        <!-- Leerzeichen zwischen den Teilen stehen auf derselben Zeile oder in der Spanne, siehe WeekView (Screenreader). -->
         <p class="tile-text" data-test="month-total">
-          <span class="tile-label">Monatssumme</span> <span class="tile-value">{{ formatHours(summary.actualMinutes) }}</span>
+          <span class="tile-label">Monatssumme</span> <span class="tile-value">
+            {{ formatHours(summary.actualMinutes) }}<span class="decimal"> ({{ formatDecimalHours(summary.actualMinutes) }})</span>
+          </span>
         </p>
         <p v-if="summary.otherMinutes > 0" class="tile-detail" data-test="month-other">
           davon {{ formatHours(summary.otherMinutes) }} am Wochenende oder an Feiertagen (nicht im Durchschnitt)
         </p>
       </div>
       <p class="tile card" data-test="month-average">
-        <span class="tile-label">Durchschnitt pro Arbeitstag</span> <span class="tile-value">{{ average.value }}</span> <span class="tile-detail">{{ average.detail }}</span>
+        <span class="tile-label">Durchschnitt pro Arbeitstag</span> <span class="tile-value">
+          {{ average.value }}<span v-if="average.decimal" class="decimal"> ({{ average.decimal }})</span>
+        </span> <span class="tile-detail">{{ average.detail }}</span>
       </p>
       <p v-if="summary.holidaysMissing" class="notice warning" data-test="month-holidays-missing">
         Für einzelne Tage dieses Monats fehlen Feiertage; ein Feiertag könnte als Arbeitstag mitgezählt sein.

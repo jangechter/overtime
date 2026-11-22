@@ -1,5 +1,13 @@
 import { describe, it, expect } from "vitest";
-import { currentWeek, formatBalance, formatDuration, formatHours, shiftWeek } from "./week";
+import {
+  currentWeek,
+  formatBalance,
+  formatDecimalBalance,
+  formatDecimalHours,
+  formatDuration,
+  formatHours,
+  shiftWeek,
+} from "./week";
 
 describe("formatDuration", () => {
   it("schreibt Minuten als Stunden und Minuten ohne Einheit", () => {
@@ -79,5 +87,34 @@ describe("formatBalance", () => {
 
   it("zeigt einen ausgeglichenen Saldo ohne Vorzeichen", () => {
     expect(formatBalance(0)).toBe("0:00 h");
+  });
+});
+
+describe("formatDecimalHours", () => {
+  it("zeigt Stunden mit zwei Nachkommastellen und Komma", () => {
+    expect(formatDecimalHours(510)).toBe("8,50 h");
+    expect(formatDecimalHours(480)).toBe("8,00 h");
+    expect(formatDecimalHours(495)).toBe("8,25 h");
+    expect(formatDecimalHours(1445)).toBe("24,08 h");
+    expect(formatDecimalHours(0)).toBe("0,00 h");
+  });
+
+  it("rundet kaufmännisch wie der CSV-Export", () => {
+    expect(formatDecimalHours(481)).toBe("8,02 h");
+    expect(formatDecimalHours(20)).toBe("0,33 h");
+    expect(formatDecimalHours(40)).toBe("0,67 h");
+    expect(formatDecimalHours(3)).toBe("0,05 h");
+  });
+});
+
+describe("formatDecimalBalance", () => {
+  it("setzt Plus vor Überstunden und Minus vor Minusstunden", () => {
+    expect(formatDecimalBalance(300)).toBe("+5,00 h");
+    expect(formatDecimalBalance(-300)).toBe("−5,00 h");
+    expect(formatDecimalBalance(-15)).toBe("−0,25 h");
+  });
+
+  it("zeigt einen ausgeglichenen Saldo ohne Vorzeichen", () => {
+    expect(formatDecimalBalance(0)).toBe("0,00 h");
   });
 });

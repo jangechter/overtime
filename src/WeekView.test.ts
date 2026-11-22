@@ -235,6 +235,16 @@ describe("WeekView", () => {
       expect(wrapper.get('[data-test="week-balance"]').text()).toContain("−8:00 h");
     });
 
+    it("zeigt Ist, Soll und Saldo zusätzlich als Dezimalstunden", async () => {
+      backend = (command) =>
+        command === "week_summary" ? Promise.resolve(summaryAnswer(2385, 2400)) : answer(command);
+      const wrapper = mount(WeekView);
+      await flushPromises();
+      expect(wrapper.get('[data-test="week-total"]').text()).toBe("Wochensumme 39:45 h (39,75 h)");
+      expect(wrapper.get('[data-test="week-target"]').text()).toBe("Soll 40:00 h (40,00 h)");
+      expect(wrapper.get('[data-test="week-balance"]').text()).toBe("Saldo −0:15 h (−0,25 h)");
+    });
+
     it("zeigt Überstunden mit Plus, Minusstunden mit Minus und einen ausgeglichenen Saldo ohne Vorzeichen", async () => {
       for (const [actual, expected] of [[2700, "+5:00 h"], [2100, "−5:00 h"], [2400, "0:00 h"]] as const) {
         backend = (command) => (command === "week_summary" ? Promise.resolve(summaryAnswer(actual)) : answer(command));
