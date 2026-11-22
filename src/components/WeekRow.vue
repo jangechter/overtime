@@ -141,11 +141,12 @@ watch([kind, start, end, breakMinutes], async () => {
 </template>
 
 <style scoped>
-/* Feste Spalten, damit Zeiten und Stunden über alle Tage bündig stehen: Tag | Art | Start | Ende | Pause | Stunden. */
+/* Feste Spalten, damit Zeiten und Stunden über alle Tage bündig stehen: Tag | Art | Start | Ende | Pause | Stunden.
+   Unten ausgerichtet, damit das Select ohne Beschriftung auf einer Linie mit den Eingabefeldern unter ihren Beschriftungen steht. */
 .week-row {
   display: grid;
   grid-template-columns: 11rem 7rem 5.5rem 5.5rem 6rem 1fr;
-  align-items: center;
+  align-items: end;
   column-gap: var(--space-4);
   padding: var(--space-3) var(--space-4);
   border-bottom: 1px solid var(--color-border);
@@ -156,11 +157,12 @@ watch([kind, start, end, breakMinutes], async () => {
 .is-holiday { background: var(--color-warning-soft); }
 .kind-sick { border-left-color: var(--color-sick); }
 .kind-vacation { border-left-color: var(--color-vacation); }
-.day { display: flex; flex-direction: column; line-height: 1.3; }
+.day { align-self: center; display: flex; flex-direction: column; line-height: 1.3; }
 .date { font-size: 0.85rem; color: var(--color-text-muted); }
 .holiday { margin-top: 2px; font-size: 0.8rem; font-weight: 600; color: var(--color-warning); }
 label { display: flex; flex-direction: column; gap: 2px; font-size: 0.75rem; color: var(--color-text-muted); }
 label input { width: 100%; font-size: 0.95rem; color: var(--color-text); font-variant-numeric: tabular-nums; }
-.hours { grid-column: -2; justify-self: end; font-weight: 700; font-variant-numeric: tabular-nums; }
+/* Zeilenhöhe wie ein Eingabefeld, damit die Stunden mittig zu den Feldern stehen. */
+.hours { grid-column: -2; justify-self: end; line-height: 2rem; font-weight: 700; font-variant-numeric: tabular-nums; }
 .error { grid-column: 1 / -1; margin-top: var(--space-2); font-size: 0.85rem; color: var(--color-danger); }
 </style>
