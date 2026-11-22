@@ -1,0 +1,223 @@
+/* Globale Design-Tokens und Grundstile. Komponenten nutzen nur die Variablen, keine festen Farben. */
+
+:root {
+  color-scheme: light dark;
+
+  --color-bg: #f5f6f8;
+  --color-surface: #ffffff;
+  --color-surface-muted: #f0f1f4;
+  --color-border: #dcdfe5;
+  --color-text: #1d2129;
+  --color-text-muted: #5d6573;
+  --color-accent: #2f6fde;
+  --color-accent-contrast: #ffffff;
+  --color-accent-soft: #e5eefc;
+  --color-danger: #b42318;
+  --color-danger-soft: #fdecea;
+  --color-warning: #8a5a00;
+  --color-warning-soft: #fff4d6;
+  --color-success: #1f7a3a;
+  --color-success-soft: #e6f4ea;
+  --color-sick: #c2410c;
+  --color-vacation: #0f766e;
+
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-6: 1.5rem;
+
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --shadow-sm: 0 1px 2px rgb(16 24 40 / 6%);
+  --focus-ring: 0 0 0 3px rgb(47 111 222 / 35%);
+
+  --font-sans: system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --color-bg: #15171c;
+    --color-surface: #1e2128;
+    --color-surface-muted: #262a32;
+    --color-border: #353a45;
+    --color-text: #e7e9ee;
+    --color-text-muted: #9aa2b1;
+    --color-accent: #6c9cf0;
+    --color-accent-contrast: #0e1420;
+    --color-accent-soft: #23324d;
+    --color-danger: #f28b82;
+    --color-danger-soft: #3a2224;
+    --color-warning: #f0c060;
+    --color-warning-soft: #362d1a;
+    --color-success: #7fd19a;
+    --color-success-soft: #1d3326;
+    --color-sick: #f59e6b;
+    --color-vacation: #5ccfc2;
+    --shadow-sm: none;
+    --focus-ring: 0 0 0 3px rgb(108 156 240 / 40%);
+  }
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--color-bg);
+  color: var(--color-text);
+  font-family: var(--font-sans);
+  font-size: 15px;
+  line-height: 1.45;
+  -webkit-font-smoothing: antialiased;
+}
+
+h1 {
+  margin: 0;
+  font-size: 1.25rem;
+  font-weight: 700;
+}
+
+button,
+input,
+select {
+  font: inherit;
+  color: inherit;
+}
+
+button {
+  padding: var(--space-1) var(--space-3);
+  min-height: 2rem;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface);
+  cursor: pointer;
+  transition: background-color 0.15s, border-color 0.15s;
+}
+
+button:hover:not(:disabled) {
+  background: var(--color-surface-muted);
+}
+
+button:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+button.primary {
+  border-color: var(--color-accent);
+  background: var(--color-accent);
+  color: var(--color-accent-contrast);
+}
+
+button.primary:hover:not(:disabled) {
+  background: var(--color-accent);
+  filter: brightness(1.08);
+}
+
+input,
+select {
+  padding: var(--space-1) var(--space-2);
+  min-height: 2rem;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface);
+}
+
+input::placeholder {
+  color: var(--color-text-muted);
+  opacity: 0.7;
+}
+
+button:focus-visible,
+input:focus-visible,
+select:focus-visible {
+  outline: none;
+  border-color: var(--color-accent);
+  box-shadow: var(--focus-ring);
+}
+
+/* Blättern zwischen Wochen bzw. Monaten: Zeitraum links, Buttons rechts. */
+.period-nav {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+  margin-bottom: var(--space-4);
+}
+
+.period-label {
+  font-size: 1.1rem;
+  font-weight: 600;
+}
+
+.period-buttons {
+  display: flex;
+  gap: var(--space-2);
+}
+
+.card {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  box-shadow: var(--shadow-sm);
+}
+
+/* Kennzahl-Kachel: kleine Beschriftung, großer Wert, optional eine Zusatzzeile. */
+.tile {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  margin: 0;
+  padding: var(--space-3) var(--space-4);
+}
+
+.tile-label {
+  font-size: 0.8rem;
+  color: var(--color-text-muted);
+}
+
+.tile-value {
+  font-size: 1.4rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.tile-detail {
+  margin: 0;
+  font-size: 0.85rem;
+  color: var(--color-text-muted);
+}
+
+/* Hinweiszeile für Fehler, Warnungen und Infos (z. B. über der Wochenübersicht). */
+.notice {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  margin: 0 0 var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  border-left: 3px solid currentColor;
+  border-radius: var(--radius-sm);
+}
+
+.notice.error {
+  color: var(--color-danger);
+  background: var(--color-danger-soft);
+}
+
+.notice.warning {
+  color: var(--color-warning);
+  background: var(--color-warning-soft);
+}
+
+.notice.info {
+  color: var(--color-success);
+  background: var(--color-success-soft);
+}
+
+.notice button {
+  color: var(--color-text);
+}

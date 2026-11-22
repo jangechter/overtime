@@ -195,39 +195,54 @@ onMounted(() => {
 
 <template>
   <section>
-    <nav class="week-nav" aria-label="Woche wählen">
-      <button type="button" data-test="prev" @click="goToWeek(-1)">← Vorherige Woche</button>
-      <span data-test="week-label">{{ weekLabel }}</span>
-      <button type="button" data-test="today" @click="goToToday">Heute</button>
-      <button type="button" data-test="next" @click="goToWeek(1)">Nächste Woche →</button>
+    <nav class="period-nav" aria-label="Woche wählen">
+      <span class="period-label" data-test="week-label">{{ weekLabel }}</span>
+      <div class="period-buttons">
+        <button type="button" data-test="prev" @click="goToWeek(-1)">← Vorherige Woche</button>
+        <button type="button" data-test="today" @click="goToToday">Heute</button>
+        <button type="button" data-test="next" @click="goToWeek(1)">Nächste Woche →</button>
+      </div>
     </nav>
-    <p v-if="loadError" class="error" role="alert" data-test="load-error">{{ loadError }}</p>
-    <p v-if="saveError" class="error" data-test="save-error">{{ saveError }}</p>
-    <p v-if="holidayWarning && holidayWarning !== loadError" class="warning" data-test="holiday-warning">{{ holidayWarning }}</p>
-    <p v-if="holidaysMissing" class="warning" data-test="holidays-missing">
+    <p v-if="loadError" class="notice error" role="alert" data-test="load-error">{{ loadError }}</p>
+    <p v-if="saveError" class="notice error" data-test="save-error">{{ saveError }}</p>
+    <p v-if="holidayWarning && holidayWarning !== loadError" class="notice warning" data-test="holiday-warning">
+      {{ holidayWarning }}
+    </p>
+    <p v-if="holidaysMissing" class="notice warning" data-test="holidays-missing">
       Feiertage für diese Woche fehlen.
       <button type="button" data-test="load-holidays" :disabled="fetching.has(days[0])" @click="loadMissingHolidays">
         Feiertage laden
       </button>
     </p>
-    <p v-if="weekFetchError" class="error" data-test="holidays-load-error">{{ weekFetchError }}</p>
+    <p v-if="weekFetchError" class="notice error" data-test="holidays-load-error">{{ weekFetchError }}</p>
     <template v-if="loaded">
-      <WeekRow
-        v-for="day in days"
-        :key="day"
-        :date="day"
-        :entry="entries[day]"
-        :holiday="holidays[day]"
-        :on-save-failed="reportSaveFailure"
-        @saved="reloadSummary"
-      />
+      <div class="days card">
+        <WeekRow
+          v-for="day in days"
+          :key="day"
+          :date="day"
+          :entry="entries[day]"
+          :holiday="holidays[day]"
+          :on-save-failed="reportSaveFailure"
+          @saved="reloadSummary"
+        />
+      </div>
       <section class="summary">
-        <p data-test="week-total">Wochensumme: {{ formatHours(summary.actualMinutes) }}</p>
-        <p data-test="week-target">Soll: {{ formatHours(summary.targetMinutes) }}</p>
-        <p data-test="week-balance" :class="{ negative: summary.balanceMinutes < 0 }">
-          Saldo: {{ formatBalance(summary.balanceMinutes) }}
+        <!-- Beschriftung und Wert in einer Zeile, damit der Text dazwischen ein Leerzeichen behält (Screenreader). -->
+        <p class="tile card" data-test="week-total">
+          <span class="tile-label">Wochensumme</span> <span class="tile-value">{{ formatHours(summary.actualMinutes) }}</span>
         </p>
-        <p v-if="summary.targetIncomplete" class="warning" data-test="target-incomplete">
+        <p class="tile card" data-test="week-target">
+          <span class="tile-label">Soll</span> <span class="tile-value">{{ formatHours(summary.targetMinutes) }}</span>
+        </p>
+        <p
+          class="tile card"
+          data-test="week-balance"
+          :class="{ negative: summary.balanceMinutes < 0, positive: summary.balanceMinutes > 0 }"
+        >
+          <span class="tile-label">Saldo</span> <span class="tile-value">{{ formatBalance(summary.balanceMinutes) }}</span>
+        </p>
+        <p v-if="summary.targetIncomplete" class="notice warning" data-test="target-incomplete">
           Das Soll ist ohne Feiertagsabzug berechnet, weil für diese Woche Feiertage fehlen.
         </p>
       </section>
@@ -236,10 +251,9 @@ onMounted(() => {
 </template>
 
 <style scoped>
-.week-nav { display: flex; align-items: center; justify-content: space-between; margin-bottom: 1rem; }
-.error { color: #b00020; }
-.warning { color: #8a5a00; }
-.summary { margin-top: 1rem; font-weight: 600; }
-.summary p { margin: 0.25rem 0; }
-.negative { color: #b00020; }
+.days { overflow: hidden; }
+.summary { display: grid; grid-template-columns: repeat(3, 1fr); gap: var(--space-3); margin-top: var(--space-4); }
+.positive .tile-value { color: var(--color-success); }
+.negative .tile-value { color: var(--color-danger); }
+.summary .notice { grid-column: 1 / -1; margin: 0; }
 </style>

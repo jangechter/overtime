@@ -45,8 +45,8 @@ async function exportCsv() {
       </nav>
       <button type="button" data-test="export" :disabled="exporting" @click="exportCsv">Export (CSV)</button>
     </header>
-    <p v-if="exportMessage" class="info" role="status" data-test="export-message">{{ exportMessage }}</p>
-    <p v-if="exportError" class="error" role="alert" data-test="export-error">{{ exportError }}</p>
+    <p v-if="exportMessage" class="notice info" role="status" data-test="export-message">{{ exportMessage }}</p>
+    <p v-if="exportError" class="notice error" role="alert" data-test="export-error">{{ exportError }}</p>
     <!-- Beide Ansichten bleiben beim Umschalten erhalten, damit Woche und Monat ihre Position behalten. -->
     <WeekView v-show="view === 'week'" :settings-version="settingsVersion" @holidays-changed="holidaysVersion++" />
     <KeepAlive>
@@ -58,10 +58,11 @@ async function exportCsv() {
 </template>
 
 <style scoped>
-main { max-width: 56rem; margin: 0 auto; padding: 1rem; font-family: system-ui, sans-serif; }
-.app-header { display: flex; align-items: center; justify-content: space-between; }
-.views button[aria-pressed="true"] { font-weight: 700; }
-.source { margin-top: 1rem; font-size: 0.8rem; color: #666; }
-.info { color: #1b5e20; }
-.error { color: #b00020; }
+main { max-width: 56rem; margin: 0 auto; padding: var(--space-4) var(--space-4) var(--space-6); }
+.app-header { display: flex; align-items: center; justify-content: space-between; gap: var(--space-4); margin-bottom: var(--space-4); }
+/* Segmentierte Umschaltung: die aktive Ansicht ist hervorgehoben. */
+.views { display: flex; padding: 3px; border: 1px solid var(--color-border); border-radius: var(--radius-md); background: var(--color-surface-muted); }
+.views button { border-color: transparent; background: transparent; color: var(--color-text-muted); }
+.views button[aria-pressed="true"] { background: var(--color-surface); color: var(--color-text); font-weight: 600; box-shadow: var(--shadow-sm); }
+.source { margin-top: var(--space-6); font-size: 0.8rem; color: var(--color-text-muted); }
 </style>

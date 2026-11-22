@@ -95,9 +95,9 @@ onMounted(load);
 
 <template>
   <section>
-    <p v-if="loadError" class="error" role="alert" data-test="settings-load-error">{{ loadError }}</p>
-    <template v-if="overview">
-      <p data-test="settings-current">Diese Woche: {{ describe(overview.current) }}</p>
+    <p v-if="loadError" class="notice error" role="alert" data-test="settings-load-error">{{ loadError }}</p>
+    <div v-if="overview" class="settings card">
+      <p class="current" data-test="settings-current">Diese Woche: {{ describe(overview.current) }}</p>
       <p v-if="overview.pending" class="pending" data-test="settings-pending">
         Ab {{ formatDate(overview.pending.validFrom) }}: {{ describe(overview.pending.settings) }}
       </p>
@@ -116,9 +116,11 @@ onMounted(load);
             <option v-for="entry in subdivisions" :key="entry.code" :value="entry.code">{{ entry.name }}</option>
           </select>
         </label>
-        <button type="submit" :disabled="saving" data-test="save-settings">Ab nächster Woche übernehmen</button>
+        <button type="submit" class="primary" :disabled="saving" data-test="save-settings">Ab nächster Woche übernehmen</button>
       </form>
-      <p v-if="saveError" class="error" role="alert" data-test="settings-save-error">{{ saveError }}</p>
+      <p v-if="saveError" class="notice error" role="alert" data-test="settings-save-error">{{ saveError }}</p>
+    </div>
+    <template v-if="overview">
       <p class="hint">
         Änderungen gelten ab Montag der nächsten Woche; die laufende und alle vergangenen Wochen behalten ihre Werte.
         Ein Feiertag senkt das Wochen-Soll um ein Tagessoll, ein Krank- oder Urlaubstag zählt mit dem Tagessoll.
@@ -131,9 +133,21 @@ onMounted(load);
 </template>
 
 <style scoped>
-.settings-form { display: flex; align-items: end; gap: 1rem; margin: 1rem 0; }
-.settings-form input { width: 5rem; }
-.pending { font-weight: 600; }
-.error { color: #b00020; }
-.hint { font-size: 0.9rem; color: #444; }
+.settings { padding: var(--space-4); }
+.current { margin: 0 0 var(--space-2); font-weight: 600; }
+.pending {
+  margin: 0 0 var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-sm);
+  background: var(--color-accent-soft);
+  color: var(--color-accent);
+  font-weight: 600;
+}
+.settings-form { display: flex; align-items: end; gap: var(--space-4); margin: var(--space-4) 0 0; }
+.settings-form label { display: flex; flex-direction: column; gap: 2px; font-size: 0.75rem; color: var(--color-text-muted); }
+.settings-form input,
+.settings-form select { font-size: 0.95rem; color: var(--color-text); }
+.settings-form input { width: 5.5rem; font-variant-numeric: tabular-nums; }
+.settings .notice { margin: var(--space-3) 0 0; }
+.hint { margin-top: var(--space-4); font-size: 0.9rem; color: var(--color-text-muted); }
 </style>

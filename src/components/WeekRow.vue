@@ -46,6 +46,7 @@ const dateLabel = computed(() =>
   parsed.value.toLocaleDateString("de-DE", { day: "2-digit", month: "2-digit", year: "numeric" }),
 );
 const hoursLabel = computed(() => (minutes.value === null ? "" : formatHours(minutes.value)));
+const isWeekend = computed(() => [0, 6].includes(parsed.value.getDay()));
 
 let latestRequest = 0;
 /** Laufende schreibende Befehle. Solange einer läuft, kann der Tag schon gespeichert sein, obwohl `stored` noch false ist. */
@@ -118,13 +119,13 @@ watch([kind, start, end, breakMinutes], async () => {
 </script>
 
 <template>
-  <div class="week-row" :class="{ 'is-holiday': holiday }">
+  <div class="week-row" :class="[`kind-${kind}`, { 'is-holiday': holiday, 'is-weekend': isWeekend }]">
     <div class="day">
       <strong>{{ weekday }}</strong>
-      <span>{{ dateLabel }}</span>
+      <span class="date">{{ dateLabel }}</span>
+      <span v-if="holiday" class="holiday" data-test="holiday">{{ holiday }}</span>
     </div>
-    <span v-if="holiday" class="holiday" data-test="holiday">{{ holiday }}</span>
-    <select v-model="kind" aria-label="Art des Tages" data-test="kind">
+    <select v-model="kind" class="kind" aria-label="Art des Tages" data-test="kind">
       <option value="work">Arbeit</option>
       <option value="sick">Krank</option>
       <option value="vacation">Urlaub</option>
@@ -140,12 +141,26 @@ watch([kind, start, end, breakMinutes], async () => {
 </template>
 
 <style scoped>
-.week-row { display: flex; align-items: center; gap: 1rem; padding: 0.5rem 0; border-bottom: 1px solid #ddd; }
-.day { display: flex; flex-direction: column; width: 8rem; }
-.hours { font-weight: 600; }
-.is-holiday { background: #fff4d6; }
-.holiday { font-weight: 600; color: #8a5a00; width: 10rem; }
-.error { color: #b00020; }
-input[type="number"] { width: 4rem; }
-input[type="text"] { width: 4.5rem; }
+/* Feste Spalten, damit Zeiten und Stunden über alle Tage bündig stehen: Tag | Art | Start | Ende | Pause | Stunden. */
+.week-row {
+  display: grid;
+  grid-template-columns: 11rem 7rem 5.5rem 5.5rem 6rem 1fr;
+  align-items: center;
+  column-gap: var(--space-4);
+  padding: var(--space-3) var(--space-4);
+  border-bottom: 1px solid var(--color-border);
+  border-left: 3px solid transparent;
+}
+.week-row:last-child { border-bottom: none; }
+.is-weekend { background: var(--color-surface-muted); }
+.is-holiday { background: var(--color-warning-soft); }
+.kind-sick { border-left-color: var(--color-sick); }
+.kind-vacation { border-left-color: var(--color-vacation); }
+.day { display: flex; flex-direction: column; line-height: 1.3; }
+.date { font-size: 0.85rem; color: var(--color-text-muted); }
+.holiday { margin-top: 2px; font-size: 0.8rem; font-weight: 600; color: var(--color-warning); }
+label { display: flex; flex-direction: column; gap: 2px; font-size: 0.75rem; color: var(--color-text-muted); }
+label input { width: 100%; font-size: 0.95rem; color: var(--color-text); font-variant-numeric: tabular-nums; }
+.hours { grid-column: -2; justify-self: end; font-weight: 700; font-variant-numeric: tabular-nums; }
+.error { grid-column: 1 / -1; margin-top: var(--space-2); font-size: 0.85rem; color: var(--color-danger); }
 </style>
