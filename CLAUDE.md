@@ -15,7 +15,7 @@
 ### Test conventions
 - Framework: Rust `cargo test` (Unit-Tests im Modul); Vue: Vitest + @vue/test-utils + jsdom
 - Location and naming: Rust-Tests in `#[cfg(test)] mod tests` direkt in der Datei (englische Testnamen); Vue-Tests neben der Komponente als `<Name>.test.ts` (deutsche Testnamen)
-- Notes: Tauri-Aufrufe werden in Vue-Tests mit einem handgeschriebenen Fake für `invoke` ersetzt, nicht mit `vi.fn` (abgelehnte Promises lösen dort einen unbehandelten Fehler aus). Kein CI, keine Coverage-Schwelle.
+- Notes: Tauri-Aufrufe werden in Vue-Tests mit einem handgeschriebenen Fake für `invoke` ersetzt, nicht mit `vi.fn` (abgelehnte Promises lösen dort einen unbehandelten Fehler aus). Kein CI bei Pushes; die Tests laufen nur im Release-Workflow (`.github/workflows/release.yml`) auf macOS, Windows und Linux. Keine Coverage-Schwelle.
 - Ticket marker in tests: comment `Regression: <TICKET>` above the test
 
 ### Review focus
