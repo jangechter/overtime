@@ -33,13 +33,17 @@ Für jedes System (macOS, Windows, Ubuntu 22.04) läuft dasselbe:
 
 ### Ohne Tag starten
 
-Unter **Actions → Release → Run workflow** lässt sich der Build auch von Hand starten. `tauri-action` legt dann den Tag `v<version>` selbst an, und zwar auf dem gewählten Commit. Das eignet sich zum Ausprobieren. Den Entwurf danach wieder löschen, wenn er kein echtes Release werden soll, und den Tag ebenfalls:
+Unter **Actions → Release → Run workflow** lässt sich der Build auch von Hand starten. Das eignet sich zum Ausprobieren. Der Entwurf zeigt dann auf den gewählten Commit. Den Tag `v<version>` legt GitHub erst beim Veröffentlichen an. Soll der Entwurf kein echtes Release werden, ihn einfach löschen. Ein Tag ist dann nie entstanden.
 
-```bash
-git push origin --delete v0.2.0
-```
+Gibt es für die Version schon einen Release oder Entwurf, hängt `tauri-action` die Dateien an ihn an. Gleichnamige Dateien werden dabei ersetzt.
 
-Gibt es für die Version schon einen Release, hängt `tauri-action` die Dateien an ihn an. Gleichnamige Dateien werden dabei ersetzt.
+### Wo ist der Entwurf?
+
+Entwürfe sind nur für dich sichtbar, und zwar **ausschließlich** auf der Seite `https://github.com/jangechter/overtime/releases`, wenn du eingeloggt bist. Nicht sichtbar sind sie:
+
+- im Kasten „Releases“ in der Seitenleiste der Repo-Startseite
+- unter *Tags*
+- über die öffentliche GitHub-API
 
 ## Erster Start beim Nutzer
 
